@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  hypertracker:
+    build: .
+    container_name: hypertracker_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./hypertracker.log:/app/hypertracker.log
+    environment:
+      - DATABASE_PATH=/app/data/hypertracker.db
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

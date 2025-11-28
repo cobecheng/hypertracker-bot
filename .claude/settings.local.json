@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source:*)",
+      "Bash(pip install:*)",
+      "Bash(/Applications/Python 3.13/Install Certificates.command)",
+      "Bash(python3 run.py:*)",
+      "Bash(venv/bin/python:*)",
+      "Bash(sqlite3:*)",
+      "Bash(kill:*)",
+      "Bash(wscat:*)",
+      "Bash(python test_binance_liq.py:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

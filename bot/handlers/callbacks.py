@@ -1,0 +1,795 @@
+"""
+Callback query handlers for inline keyboard interactions.
+"""
+import logging
+
+from aiogram import Router, F
+from aiogram.types import CallbackQuery
+from aiogram.fsm.context import FSMContext
+
+from bot.keyboards import (
+    get_main_menu_keyboard, get_wallet_list_keyboard, get_wallet_detail_keyboard,
+    get_wallet_edit_keyboard, get_notification_types_keyboard, get_order_type_keyboard,
+    get_direction_keyboard, get_confirm_remove_keyboard, get_liquidation_settings_keyboard,
+    get_venues_keyboard, get_back_to_menu_keyboard, get_global_settings_keyboard,
+    get_global_filter_edit_keyboard, get_global_notification_types_keyboard,
+    get_global_order_type_keyboard, get_global_direction_keyboard
+)
+from bot.handlers.commands import (
+    AddWalletStates, EditWalletStates, EditLiquidationStates, EditGlobalFilterStates, db
+)
+from core.models import NotificationType, OrderType, Direction
+from utils.filters import format_address
+
+logger = logging.getLogger(__name__)
+
+router = Router()
+
+
+@router.callback_query(F.data == "main_menu")
+async def callback_main_menu(callback: CallbackQuery, state: FSMContext):
+    """Show main menu."""
+    await state.clear()
+
+    welcome_text = """
+🎉 Welcome to HyperTracker Bot!
+
+Track Hyperliquid wallets in real-time and monitor large liquidations across multiple venues.
+
+Features:
+• 📊 Real-time wallet tracking with customizable filters
+• 🚨 Large liquidation alerts (Hyperliquid, Binance, Bybit, OKX, etc.)
+• ⚡ Sub-2-second latency from event to notification
+• 🎯 Per-wallet notification settings
+
+Choose an option below to get started:
+"""
+
+    await callback.message.edit_text(
+        welcome_text,
+        reply_markup=get_main_menu_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "add_wallet")
+async def callback_add_wallet(callback: CallbackQuery, state: FSMContext):
+    """Start add wallet flow."""
+    await callback.message.edit_text(
+        "➕ **Add Wallet**\n\n"
+        "Send me one or more Hyperliquid wallet addresses.\n"
+        "You can send multiple addresses separated by commas or newlines.\n\n"
+        "Example:\n"
+        "`0x1234567890abcdef...`\n"
+        "or\n"
+        "`0x1234..., 0x5678...`\n\n"
+        "Type /cancel to abort.",
+        parse_mode="Markdown"
+    )
+    
+    await state.set_state(AddWalletStates.waiting_for_addresses)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "my_wallets")
+async def callback_my_wallets(callback: CallbackQuery):
+    """Show user's wallets."""
+    wallets = await db.get_user_wallets(callback.from_user.id)
+
+    if not wallets:
+        await callback.message.edit_text(
+            "📋 **My Wallets**\n\n"
+            "You don't have any wallets yet.\n"
+            "Click 'Add Wallet' to start tracking!",
+            reply_markup=get_main_menu_keyboard()
+        )
+    else:
+        # Count active wallets
+        active_count = sum(1 for w in wallets if w.active)
+
+        await callback.message.edit_text(
+            f"📋 **Tracked Wallets**\n\n"
+            f"You have **{len(wallets)} wallet(s)** in your tracking list.\n"
+            f"• Active: {active_count}\n"
+            f"• Inactive: {len(wallets) - active_count}\n\n"
+            f"Select a wallet to view details and edit settings:",
+            reply_markup=get_wallet_list_keyboard(wallets)
+        )
+    
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("wallet:"))
+async def callback_wallet_detail(callback: CallbackQuery):
+    """Show wallet details."""
+    wallet_id = int(callback.data.split(":")[1])
+    wallet = await db.get_wallet_by_id(wallet_id)
+    
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    # Format wallet info
+    status = "✅ Active" if wallet.active else "❌ Inactive"
+    notifications = "🔔 Enabled" if wallet.filters.notifications_enabled else "🔕 Disabled"
+    
+    notify_types = ", ".join([nt.value.title() for nt in wallet.filters.notify_on]) if wallet.filters.notify_on else "None"
+    assets = ", ".join(wallet.filters.assets) if wallet.filters.assets else "All"
+    
+    info_text = f"""
+🔍 **Wallet Details**
+
+**Name:** {wallet.alias if wallet.alias else 'No alias'}
+**Address:** `{wallet.address}`
+**Status:** {status}
+**Notifications:** {notifications}
+
+**Filters:**
+• Types: {notify_types}
+• Assets: {assets}
+• Order Type: {wallet.filters.order_type.value.title()}
+• Direction: {wallet.filters.direction.value.title()}
+• Min Notional: ${wallet.filters.min_notional_usd:,.2f}
+"""
+    
+    await callback.message.edit_text(
+        info_text,
+        reply_markup=get_wallet_detail_keyboard(wallet_id),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_wallet:"))
+async def callback_edit_wallet(callback: CallbackQuery):
+    """Show wallet edit menu."""
+    wallet_id = int(callback.data.split(":")[1])
+    wallet = await db.get_wallet_by_id(wallet_id)
+    
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        f"✏️ **Edit Wallet Filters**\n\n"
+        f"Wallet: {wallet.alias if wallet.alias else format_address(wallet.address)}\n\n"
+        f"Choose what to edit:",
+        reply_markup=get_wallet_edit_keyboard(wallet_id)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("toggle_wallet:"))
+async def callback_toggle_wallet(callback: CallbackQuery):
+    """Toggle wallet notifications on/off."""
+    wallet_id = int(callback.data.split(":")[1])
+    wallet = await db.get_wallet_by_id(wallet_id)
+    
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    # Toggle notifications
+    wallet.filters.notifications_enabled = not wallet.filters.notifications_enabled
+    await db.update_wallet_filters(wallet_id, wallet.filters)
+    
+    status = "enabled" if wallet.filters.notifications_enabled else "disabled"
+    await callback.answer(f"✅ Notifications {status}", show_alert=True)
+    
+    # Refresh wallet detail view
+    await callback_wallet_detail(callback)
+
+
+@router.callback_query(F.data.startswith("edit_notify_types:"))
+async def callback_edit_notify_types(callback: CallbackQuery):
+    """Edit notification types."""
+    wallet_id = int(callback.data.split(":")[1])
+    wallet = await db.get_wallet_by_id(wallet_id)
+    
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "📢 **Select Notification Types**\n\n"
+        "Choose which events should trigger notifications:",
+        reply_markup=get_notification_types_keyboard(wallet_id, wallet.filters.notify_on)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("toggle_notif:"))
+async def callback_toggle_notif(callback: CallbackQuery):
+    """Toggle specific notification type."""
+    parts = callback.data.split(":")
+    wallet_id = int(parts[1])
+    notif_type = NotificationType(parts[2])
+    
+    wallet = await db.get_wallet_by_id(wallet_id)
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    # Toggle notification type
+    if notif_type in wallet.filters.notify_on:
+        wallet.filters.notify_on.remove(notif_type)
+    else:
+        wallet.filters.notify_on.append(notif_type)
+    
+    await db.update_wallet_filters(wallet_id, wallet.filters)
+    
+    # Refresh keyboard
+    await callback.message.edit_reply_markup(
+        reply_markup=get_notification_types_keyboard(wallet_id, wallet.filters.notify_on)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_assets:"))
+async def callback_edit_assets(callback: CallbackQuery, state: FSMContext):
+    """Start editing asset filter."""
+    wallet_id = int(callback.data.split(":")[1])
+    wallet = await db.get_wallet_by_id(wallet_id)
+    
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    current = ", ".join(wallet.filters.assets) if wallet.filters.assets else "All assets"
+    
+    await callback.message.edit_text(
+        f"🪙 **Filter by Asset**\n\n"
+        f"Current: {current}\n\n"
+        f"Send asset symbols separated by spaces or commas.\n"
+        f"Examples: `BTC ETH SOL` or `BTC, ETH, SOL`\n\n"
+        f"Send `*` or `all` for all assets.\n"
+        f"Type /cancel to abort.",
+        parse_mode="Markdown"
+    )
+    
+    await state.update_data(wallet_id=wallet_id)
+    await state.set_state(EditWalletStates.waiting_for_assets)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_order_type:"))
+async def callback_edit_order_type(callback: CallbackQuery):
+    """Edit order type filter."""
+    wallet_id = int(callback.data.split(":")[1])
+    wallet = await db.get_wallet_by_id(wallet_id)
+    
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "📊 **Order Type Filter**\n\n"
+        "Select which order types to track:",
+        reply_markup=get_order_type_keyboard(wallet_id, wallet.filters.order_type)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_order_type:"))
+async def callback_set_order_type(callback: CallbackQuery):
+    """Set order type."""
+    parts = callback.data.split(":")
+    wallet_id = int(parts[1])
+    order_type = OrderType(parts[2])
+    
+    wallet = await db.get_wallet_by_id(wallet_id)
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    wallet.filters.order_type = order_type
+    await db.update_wallet_filters(wallet_id, wallet.filters)
+    
+    await callback.answer(f"✅ Order type set to {order_type.value.title()}", show_alert=True)
+    
+    # Refresh keyboard
+    await callback.message.edit_reply_markup(
+        reply_markup=get_order_type_keyboard(wallet_id, wallet.filters.order_type)
+    )
+
+
+@router.callback_query(F.data.startswith("edit_direction:"))
+async def callback_edit_direction(callback: CallbackQuery):
+    """Edit direction filter."""
+    wallet_id = int(callback.data.split(":")[1])
+    wallet = await db.get_wallet_by_id(wallet_id)
+    
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "📈 **Direction Filter**\n\n"
+        "Select which trade directions to track:",
+        reply_markup=get_direction_keyboard(wallet_id, wallet.filters.direction)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_direction:"))
+async def callback_set_direction(callback: CallbackQuery):
+    """Set direction filter."""
+    parts = callback.data.split(":")
+    wallet_id = int(parts[1])
+    direction = Direction(parts[2])
+    
+    wallet = await db.get_wallet_by_id(wallet_id)
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    wallet.filters.direction = direction
+    await db.update_wallet_filters(wallet_id, wallet.filters)
+    
+    await callback.answer(f"✅ Direction set to {direction.value.title()}", show_alert=True)
+    
+    # Refresh keyboard
+    await callback.message.edit_reply_markup(
+        reply_markup=get_direction_keyboard(wallet_id, wallet.filters.direction)
+    )
+
+
+@router.callback_query(F.data.startswith("edit_min_notional:"))
+async def callback_edit_min_notional(callback: CallbackQuery, state: FSMContext):
+    """Start editing minimum notional."""
+    wallet_id = int(callback.data.split(":")[1])
+    wallet = await db.get_wallet_by_id(wallet_id)
+    
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        f"💰 **Minimum Notional USD**\n\n"
+        f"Current: ${wallet.filters.min_notional_usd:,.2f}\n\n"
+        f"Send the new minimum notional value in USD.\n"
+        f"Example: `1000` or `$1,000`\n\n"
+        f"Type /cancel to abort.",
+        parse_mode="Markdown"
+    )
+    
+    await state.update_data(wallet_id=wallet_id)
+    await state.set_state(EditWalletStates.waiting_for_min_notional)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("remove_wallet:"))
+async def callback_remove_wallet(callback: CallbackQuery):
+    """Confirm wallet removal."""
+    wallet_id = int(callback.data.split(":")[1])
+    wallet = await db.get_wallet_by_id(wallet_id)
+    
+    if not wallet or wallet.user_id != callback.from_user.id:
+        await callback.answer("❌ Wallet not found", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        f"🗑️ **Remove Wallet**\n\n"
+        f"Are you sure you want to remove this wallet?\n\n"
+        f"**{wallet.alias if wallet.alias else format_address(wallet.address)}**\n"
+        f"`{wallet.address}`\n\n"
+        f"This action cannot be undone.",
+        reply_markup=get_confirm_remove_keyboard(wallet_id),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("confirm_remove:"))
+async def callback_confirm_remove(callback: CallbackQuery):
+    """Actually remove the wallet."""
+    wallet_id = int(callback.data.split(":")[1])
+    
+    success = await db.delete_wallet(wallet_id, callback.from_user.id)
+    
+    if success:
+        await callback.answer("✅ Wallet removed", show_alert=True)
+        await callback_my_wallets(callback)
+    else:
+        await callback.answer("❌ Failed to remove wallet", show_alert=True)
+
+
+@router.callback_query(F.data == "liquidations")
+async def callback_liquidations(callback: CallbackQuery):
+    """Show liquidation settings."""
+    settings = await db.get_user_settings(callback.from_user.id)
+    liq_filters = settings.liquidation_filters
+    
+    status = "🔔 Enabled" if liq_filters.enabled else "🔕 Disabled"
+    venues = ", ".join(liq_filters.venues) if liq_filters.venues else "None"
+    pairs = ", ".join(liq_filters.pairs) if liq_filters.pairs else "All"
+    
+    text = f"""
+🚨 **Liquidation Monitor**
+
+**Status:** {status}
+**Venues:** {venues}
+**Pairs:** {pairs}
+**Min Notional:** ${liq_filters.min_notional_usd:,.2f}
+
+Configure your liquidation alert settings below:
+"""
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_liquidation_settings_keyboard(liq_filters.enabled)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "toggle_liq_monitor")
+async def callback_toggle_liq_monitor(callback: CallbackQuery):
+    """Toggle liquidation monitoring."""
+    settings = await db.get_user_settings(callback.from_user.id)
+    settings.liquidation_filters.enabled = not settings.liquidation_filters.enabled
+    
+    await db.update_liquidation_settings(callback.from_user.id, settings.liquidation_filters)
+    
+    status = "enabled" if settings.liquidation_filters.enabled else "disabled"
+    await callback.answer(f"✅ Liquidation alerts {status}", show_alert=True)
+    
+    # Refresh view
+    await callback_liquidations(callback)
+
+
+@router.callback_query(F.data == "edit_liq_venues")
+async def callback_edit_liq_venues(callback: CallbackQuery):
+    """Edit liquidation venues."""
+    settings = await db.get_user_settings(callback.from_user.id)
+    
+    await callback.message.edit_text(
+        "🏢 **Select Venues**\n\n"
+        "Choose which venues to monitor for liquidations:",
+        reply_markup=get_venues_keyboard(settings.liquidation_filters.venues)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("toggle_venue:"))
+async def callback_toggle_venue(callback: CallbackQuery):
+    """Toggle venue selection."""
+    venue = callback.data.split(":", 1)[1]
+    settings = await db.get_user_settings(callback.from_user.id)
+    
+    if venue in settings.liquidation_filters.venues:
+        settings.liquidation_filters.venues.remove(venue)
+    else:
+        settings.liquidation_filters.venues.append(venue)
+    
+    await db.update_liquidation_settings(callback.from_user.id, settings.liquidation_filters)
+    
+    # Refresh keyboard
+    await callback.message.edit_reply_markup(
+        reply_markup=get_venues_keyboard(settings.liquidation_filters.venues)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edit_liq_pairs")
+async def callback_edit_liq_pairs(callback: CallbackQuery, state: FSMContext):
+    """Start editing liquidation pairs."""
+    settings = await db.get_user_settings(callback.from_user.id)
+    current = ", ".join(settings.liquidation_filters.pairs) if settings.liquidation_filters.pairs else "All pairs"
+    
+    await callback.message.edit_text(
+        f"🪙 **Filter Liquidation Pairs**\n\n"
+        f"Current: {current}\n\n"
+        f"Send pair symbols separated by spaces or commas.\n"
+        f"Examples: `BTC ETH SOL` or `BTC-USDT, ETH-USDT`\n\n"
+        f"Send `*` or `all` for all pairs.\n"
+        f"Type /cancel to abort.",
+        parse_mode="Markdown"
+    )
+    
+    await state.set_state(EditLiquidationStates.waiting_for_pairs)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edit_liq_min_notional")
+async def callback_edit_liq_min_notional(callback: CallbackQuery, state: FSMContext):
+    """Start editing liquidation minimum notional."""
+    settings = await db.get_user_settings(callback.from_user.id)
+    
+    await callback.message.edit_text(
+        f"💰 **Liquidation Min Notional**\n\n"
+        f"Current: ${settings.liquidation_filters.min_notional_usd:,.2f}\n\n"
+        f"Send the new minimum notional value in USD.\n"
+        f"Example: `50000` or `$50,000`\n\n"
+        f"Type /cancel to abort.",
+        parse_mode="Markdown"
+    )
+    
+    await state.set_state(EditLiquidationStates.waiting_for_min_notional)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "stats")
+async def callback_stats(callback: CallbackQuery):
+    """Show bot stats."""
+    from bot.handlers.commands import start_time
+    import time
+    from datetime import datetime
+
+    stats = await db.get_stats()
+    uptime_seconds = time.time() - start_time
+
+    hours = int(uptime_seconds // 3600)
+    minutes = int((uptime_seconds % 3600) // 60)
+
+    stats_text = f"""
+📊 **Bot Statistics**
+
+👥 Total Users: {stats['total_users']}
+📋 Total Wallets: {stats['total_wallets']}
+✅ Active Wallets: {stats['active_wallets']}
+⏱️ Uptime: {hours}h {minutes}m
+
+Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
+"""
+
+    await callback.message.edit_text(stats_text, reply_markup=get_back_to_menu_keyboard())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "global_settings")
+async def callback_global_settings(callback: CallbackQuery):
+    """Show global filter settings."""
+    settings = await db.get_user_settings(callback.from_user.id)
+
+    if settings.global_wallet_filters:
+        filters = settings.global_wallet_filters
+
+        # Format notification types
+        notify_types = ", ".join([t.value for t in filters.notify_on]) if filters.notify_on else "None"
+
+        # Format assets
+        assets = ", ".join(filters.assets) if filters.assets else "All"
+
+        text = f"""
+⚙️ **Global Wallet Filter Settings**
+
+These filters apply to all wallets by default. Individual wallet filters will override these settings.
+
+**Status:** {"🔔 Enabled" if filters.notifications_enabled else "🔕 Disabled"}
+**Notify On:** {notify_types}
+**Assets:** {assets}
+**Order Type:** {filters.order_type.value}
+**Direction:** {filters.direction.value}
+**Min Notional:** ${filters.min_notional_usd:,.2f}
+
+Choose an option below:
+"""
+    else:
+        text = """
+⚙️ **Global Wallet Filter Settings**
+
+You haven't set global filters yet. Global filters apply to all wallets by default, unless a wallet has individual filters configured.
+
+Setting global filters can help you:
+• Avoid setting the same filters for each wallet
+• Quickly enable/disable all notifications
+• Filter by specific notification types, assets, or trade sizes
+
+Choose an option below:
+"""
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_global_settings_keyboard(settings.global_wallet_filters is not None)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set_global_filters")
+async def callback_set_global_filters(callback: CallbackQuery):
+    """Set default global filters."""
+    from core.models import WalletFilters
+
+    settings = await db.get_user_settings(callback.from_user.id)
+
+    # Create default filters if they don't exist
+    if not settings.global_wallet_filters:
+        settings.global_wallet_filters = WalletFilters()
+        await db.update_global_wallet_filters(callback.from_user.id, settings.global_wallet_filters)
+
+    await callback.answer("✅ Global filters initialized with defaults", show_alert=True)
+
+    # Refresh the global settings view
+    await callback_global_settings(callback)
+
+
+@router.callback_query(F.data == "edit_global_filters")
+async def callback_edit_global_filters(callback: CallbackQuery):
+    """Show menu to edit global filters."""
+    await callback.message.edit_text(
+        "✏️ **Edit Global Filters**\n\n"
+        "Choose what to edit:",
+        reply_markup=get_global_filter_edit_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "remove_global_filters")
+async def callback_remove_global_filters(callback: CallbackQuery):
+    """Remove global filters."""
+    settings = await db.get_user_settings(callback.from_user.id)
+    settings.global_wallet_filters = None
+    await db.update_user_settings(callback.from_user.id, settings)
+
+    await callback.answer("✅ Global filters removed", show_alert=True)
+
+    # Refresh the global settings view
+    await callback_global_settings(callback)
+
+
+@router.callback_query(F.data == "edit_global_notify_types")
+async def callback_edit_global_notify_types(callback: CallbackQuery):
+    """Edit global notification types."""
+    settings = await db.get_user_settings(callback.from_user.id)
+
+    if not settings.global_wallet_filters:
+        await callback.answer("❌ Please set global filters first", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "📢 **Select Global Notification Types**\n\n"
+        "Choose which events should trigger notifications by default:",
+        reply_markup=get_global_notification_types_keyboard(settings.global_wallet_filters.notify_on)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("toggle_global_notif:"))
+async def callback_toggle_global_notif(callback: CallbackQuery):
+    """Toggle global notification type."""
+    notif_type = NotificationType(callback.data.split(":", 1)[1])
+
+    settings = await db.get_user_settings(callback.from_user.id)
+
+    if not settings.global_wallet_filters:
+        await callback.answer("❌ Global filters not found", show_alert=True)
+        return
+
+    # Toggle notification type
+    if notif_type in settings.global_wallet_filters.notify_on:
+        settings.global_wallet_filters.notify_on.remove(notif_type)
+    else:
+        settings.global_wallet_filters.notify_on.append(notif_type)
+
+    await db.update_global_wallet_filters(callback.from_user.id, settings.global_wallet_filters)
+
+    # Refresh keyboard
+    await callback.message.edit_reply_markup(
+        reply_markup=get_global_notification_types_keyboard(settings.global_wallet_filters.notify_on)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edit_global_assets")
+async def callback_edit_global_assets(callback: CallbackQuery, state: FSMContext):
+    """Start editing global asset filter."""
+    settings = await db.get_user_settings(callback.from_user.id)
+
+    if not settings.global_wallet_filters:
+        await callback.answer("❌ Please set global filters first", show_alert=True)
+        return
+
+    current = ", ".join(settings.global_wallet_filters.assets) if settings.global_wallet_filters.assets else "All assets"
+
+    await callback.message.edit_text(
+        f"🪙 **Filter by Asset (Global)**\n\n"
+        f"Current: {current}\n\n"
+        f"Send asset symbols separated by spaces or commas.\n"
+        f"Examples: `BTC ETH SOL` or `BTC, ETH, SOL`\n\n"
+        f"Send `*` or `all` for all assets.\n"
+        f"Type /cancel to abort.",
+        parse_mode="Markdown"
+    )
+
+    await state.set_state(EditGlobalFilterStates.waiting_for_assets)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edit_global_order_type")
+async def callback_edit_global_order_type(callback: CallbackQuery):
+    """Edit global order type filter."""
+    settings = await db.get_user_settings(callback.from_user.id)
+
+    if not settings.global_wallet_filters:
+        await callback.answer("❌ Please set global filters first", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "📊 **Global Order Type Filter**\n\n"
+        "Select which order types to track by default:",
+        reply_markup=get_global_order_type_keyboard(settings.global_wallet_filters.order_type)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_global_order_type:"))
+async def callback_set_global_order_type(callback: CallbackQuery):
+    """Set global order type."""
+    order_type = OrderType(callback.data.split(":", 1)[1])
+
+    settings = await db.get_user_settings(callback.from_user.id)
+
+    if not settings.global_wallet_filters:
+        await callback.answer("❌ Global filters not found", show_alert=True)
+        return
+
+    settings.global_wallet_filters.order_type = order_type
+    await db.update_global_wallet_filters(callback.from_user.id, settings.global_wallet_filters)
+
+    await callback.answer(f"✅ Order type set to {order_type.value.title()}", show_alert=True)
+
+    # Refresh keyboard
+    await callback.message.edit_reply_markup(
+        reply_markup=get_global_order_type_keyboard(settings.global_wallet_filters.order_type)
+    )
+
+
+@router.callback_query(F.data == "edit_global_direction")
+async def callback_edit_global_direction(callback: CallbackQuery):
+    """Edit global direction filter."""
+    settings = await db.get_user_settings(callback.from_user.id)
+
+    if not settings.global_wallet_filters:
+        await callback.answer("❌ Please set global filters first", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "📈 **Global Direction Filter**\n\n"
+        "Select which trade directions to track by default:",
+        reply_markup=get_global_direction_keyboard(settings.global_wallet_filters.direction)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_global_direction:"))
+async def callback_set_global_direction(callback: CallbackQuery):
+    """Set global direction filter."""
+    direction = Direction(callback.data.split(":", 1)[1])
+
+    settings = await db.get_user_settings(callback.from_user.id)
+
+    if not settings.global_wallet_filters:
+        await callback.answer("❌ Global filters not found", show_alert=True)
+        return
+
+    settings.global_wallet_filters.direction = direction
+    await db.update_global_wallet_filters(callback.from_user.id, settings.global_wallet_filters)
+
+    await callback.answer(f"✅ Direction set to {direction.value.title()}", show_alert=True)
+
+    # Refresh keyboard
+    await callback.message.edit_reply_markup(
+        reply_markup=get_global_direction_keyboard(settings.global_wallet_filters.direction)
+    )
+
+
+@router.callback_query(F.data == "edit_global_min_notional")
+async def callback_edit_global_min_notional(callback: CallbackQuery, state: FSMContext):
+    """Start editing global minimum notional."""
+    settings = await db.get_user_settings(callback.from_user.id)
+
+    if not settings.global_wallet_filters:
+        await callback.answer("❌ Please set global filters first", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"💰 **Global Minimum Notional USD**\n\n"
+        f"Current: ${settings.global_wallet_filters.min_notional_usd:,.2f}\n\n"
+        f"Send the new minimum notional value in USD.\n"
+        f"Example: `1000` or `$1,000`\n\n"
+        f"Type /cancel to abort.",
+        parse_mode="Markdown"
+    )
+
+    await state.set_state(EditGlobalFilterStates.waiting_for_min_notional)
+    await callback.answer()
