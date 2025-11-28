@@ -39,6 +39,15 @@ data/
 *.db
 *.log
 
+# PM2 and deployment
+logs/
+.pm2/
+ecosystem.config.js.backup
+
+# SSH keys (just in case)
+*.pem
+*.ppk
+
 # OS
 .DS_Store
 Thumbs.db
