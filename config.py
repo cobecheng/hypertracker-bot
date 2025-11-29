@@ -2,7 +2,6 @@
 Configuration module for HyperTracker Bot.
 Loads environment variables and provides application settings.
 """
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -11,10 +10,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
-    
+
     # Telegram Bot Configuration
     bot_token: str
-    
+
+    # Notification Destinations
+    # Format: "chat_id" or "chat_id:thread_id" for topics
+    # Leave empty to send to user's private chat
+    trades_chat_id: Optional[str] = None
+    liquidations_chat_id: Optional[str] = None
+
     # Database Configuration
     database_path: str = "./data/hypertracker.db"
     

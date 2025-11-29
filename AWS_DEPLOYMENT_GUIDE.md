@@ -120,10 +120,10 @@ sudo apt update && sudo apt upgrade -y
 
 ```bash
 # Install Python 3.11 and pip
-sudo apt install python3.11 python3.11-venv python3-pip -y
+sudo apt install python3.12 python3.12-venv python3-pip -y
 
 # Verify installation
-python3.11 --version
+python3.12 --version
 ```
 
 ### 4.3 Install Git
@@ -140,7 +140,7 @@ git --version
 sudo apt install sqlite3 -y
 
 # Install system dependencies for Python packages
-sudo apt install build-essential libssl-dev libffi-dev python3.11-dev -y
+sudo apt install build-essential libssl-dev libffi-dev python3.12-dev -y
 ```
 
 ## Part 5: Deploy Your Bot
@@ -159,7 +159,7 @@ cd hypertracker-bot
 
 ```bash
 # Create virtual environment
-python3.11 -m venv venv
+python3.12 -m venv venv
 
 # Activate virtual environment
 source venv/bin/activate
