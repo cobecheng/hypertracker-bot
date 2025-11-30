@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # Telegram Bot Configuration
     bot_token: str
 
+    # Whitelisted user ID - only this user gets notifications sent to group
+    whitelisted_user_id: Optional[int] = None
+
     # Notification Destinations
     # Format: "chat_id" or "chat_id:thread_id" for topics
     # Leave empty to send to user's private chat

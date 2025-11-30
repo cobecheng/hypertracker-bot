@@ -42,25 +42,51 @@ Each destination can be:
 4. Add the bot to the group
 5. **Important**: Make sure the bot has permission to send messages in the group
 
-### 3. Configure .env File
+### 3. Get Your Telegram User ID
 
-Edit your `.env` file and add the chat IDs:
+To whitelist yourself, you need your Telegram user ID:
+
+1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
+2. It will reply with your user ID (a number like `123456789`)
+3. Save this number - you'll need it for the `.env` file
+
+### 4. Configure .env File
+
+Edit your `.env` file and add the configuration:
 
 ```bash
-# Example 1: Send trades to a group, liquidations to private chat
-TRADES_CHAT_ID=-1001234567890
-LIQUIDATIONS_CHAT_ID=
+# Your Telegram user ID (only your notifications go to the group)
+WHITELISTED_USER_ID=123456789
 
-# Example 2: Send to different topics in the same group
+# Group/topic destinations
+TRADES_CHAT_ID=-1003041883586:3
+LIQUIDATIONS_CHAT_ID=-1003041883586:34
+```
+
+**How it works:**
+- **Your notifications** (user ID = `WHITELISTED_USER_ID`) → Go to group topics
+- **Other users' notifications** → Go to their private chat with the bot
+
+**Examples:**
+
+```bash
+# Example 1: Only you get group notifications, others get private chat
+WHITELISTED_USER_ID=123456789
 TRADES_CHAT_ID=-1001234567890:12345
 LIQUIDATIONS_CHAT_ID=-1001234567890:67890
 
-# Example 3: Send to different groups
+# Example 2: Everyone's notifications go to the group (not recommended)
+WHITELISTED_USER_ID=
 TRADES_CHAT_ID=-1001234567890
-LIQUIDATIONS_CHAT_ID=-1009876543210
+LIQUIDATIONS_CHAT_ID=-1001234567890
+
+# Example 3: Everyone gets private chat (original behavior)
+WHITELISTED_USER_ID=
+TRADES_CHAT_ID=
+LIQUIDATIONS_CHAT_ID=
 ```
 
-### 4. Restart the Bot
+### 5. Restart the Bot
 
 ```bash
 # If running with docker-compose
@@ -94,21 +120,29 @@ If you leave it empty or don't set it, notifications will go to the user's priva
 ## How It Works
 
 1. **You manage the bot via private messages**: Add wallets, configure filters, etc.
-2. **Notifications go to configured destinations**:
-   - If `TRADES_CHAT_ID` is set → trade notifications go there
-   - If `LIQUIDATIONS_CHAT_ID` is set → liquidation notifications go there
-   - If not set → notifications go to your private chat (original behavior)
+2. **Whitelisting controls who gets group notifications**:
+   - If `WHITELISTED_USER_ID` is set → Only that user's notifications go to the group
+   - Other users' notifications → Always go to their private chat
+   - If `WHITELISTED_USER_ID` is empty → All users' notifications go to the group (if configured)
+3. **Notifications routing**:
+   - **Whitelisted user**: Follows `TRADES_CHAT_ID` and `LIQUIDATIONS_CHAT_ID` settings
+   - **Non-whitelisted users**: Always private chat, regardless of group settings
+   - If chat IDs are empty → Falls back to private chat
 
 ## Example Use Cases
 
-### Use Case 1: Report to Boss in Group Topics
+### Use Case 1: Report to Boss in Group Topics (Your Recommended Setup)
 ```bash
+# Only your notifications go to the group
+WHITELISTED_USER_ID=123456789
+
 # Trades go to "Trading Alerts" topic
 TRADES_CHAT_ID=-1001234567890:12345
 
 # Liquidations go to "Market Events" topic
 LIQUIDATIONS_CHAT_ID=-1001234567890:67890
 ```
+**Result**: Your tracked wallets send notifications to the group topics. If someone else uses the bot, their notifications go to their private chat only.
 
 ### Use Case 2: Separate Groups for Different Notification Types
 ```bash

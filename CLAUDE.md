@@ -166,12 +166,6 @@ docker-compose down         # Stop
 
 4. **Rate Limiting**: Basic implementation with fixed 50ms delay. High-volume users may need adaptive rate limiting or batching.
 
-5. **Future Features**: Placeholder modules in `core/` for:
-   - `large_transfers_ws.py` - Whale wallet tracking
-   - `oi_monitor.py` - Open interest monitoring
-   - `funding_rate_tracker.py` - Funding rate alerts
-   - `volume_anomaly_detector.py` - Volume spike detection
-
 ## File Naming & Module Structure
 
 - Entry points in root: `run.py` (preferred), `main.py`, `launch.py`, `bot.py`

@@ -70,18 +70,29 @@ class Notifier:
         Returns:
             Tuple of (chat_id, message_thread_id)
         """
-        if notification_type == 'trades':
-            chat_id, thread_id = self._parse_chat_destination(self._settings.trades_chat_id)
-        elif notification_type == 'liquidations':
-            chat_id, thread_id = self._parse_chat_destination(self._settings.liquidations_chat_id)
+        # Check if user is whitelisted for group notifications
+        is_whitelisted = (
+            self._settings.whitelisted_user_id is None or  # No whitelist = all users
+            user_id == self._settings.whitelisted_user_id   # User is whitelisted
+        )
+
+        # Only use group chat if user is whitelisted
+        if is_whitelisted:
+            if notification_type == 'trades':
+                chat_id, thread_id = self._parse_chat_destination(self._settings.trades_chat_id)
+            elif notification_type == 'liquidations':
+                chat_id, thread_id = self._parse_chat_destination(self._settings.liquidations_chat_id)
+            else:
+                chat_id, thread_id = None, None
+
+            # Fall back to user's private chat if no override configured
+            if chat_id is None:
+                chat_id = user_id
+
+            return chat_id, thread_id
         else:
-            chat_id, thread_id = None, None
-
-        # Fall back to user's private chat if no override configured
-        if chat_id is None:
-            chat_id = user_id
-
-        return chat_id, thread_id
+            # Non-whitelisted users always get private chat notifications
+            return user_id, None
     
     async def notify_fill(self, user_id: int, fill: HyperliquidFill, wallet: Wallet):
         """Send fill notification to user."""
