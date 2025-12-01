@@ -29,6 +29,8 @@ class NotificationType(str, Enum):
     LIQUIDATION = "liquidation"
     DEPOSIT = "deposit"
     WITHDRAWAL = "withdrawal"
+    TWAP = "twap"
+    TWAP_CANCEL = "twap_cancel"
 
 
 class WalletFilters(BaseModel):
@@ -99,6 +101,22 @@ class HyperliquidWithdrawal(BaseModel):
     usd: str
     time: int
     hash: Optional[str] = None
+
+
+class HyperliquidTwapOrder(BaseModel):
+    """Hyperliquid TWAP order event."""
+    wallet: str
+    coin: str
+    side: str  # "A" (ask/sell) or "B" (bid/buy)
+    sz: str  # total size
+    time: int  # timestamp in seconds (not milliseconds!)
+    minutes: int  # TWAP duration in minutes
+    executed_sz: str = "0.0"  # size executed so far
+    executed_ntl: str = "0.0"  # notional executed so far
+    reduce_only: bool = False
+    randomize: bool = False
+    twap_id: Optional[int] = None  # TWAP order ID
+    status: str = "activated"  # TWAP status (activated, filled, cancelled, etc.)
 
 
 class LiquidationEvent(BaseModel):

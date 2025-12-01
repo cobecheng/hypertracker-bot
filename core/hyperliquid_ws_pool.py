@@ -7,7 +7,7 @@ import logging
 from typing import Dict, Callable, Optional
 
 from core.hyperliquid_ws import HyperliquidWebSocket
-from core.models import HyperliquidFill, HyperliquidDeposit, HyperliquidWithdrawal
+from core.models import HyperliquidFill, HyperliquidDeposit, HyperliquidWithdrawal, HyperliquidTwapOrder
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ class HyperliquidWebSocketPool:
         self.on_deposit: Optional[Callable] = None
         self.on_withdrawal: Optional[Callable] = None
         self.on_liquidation: Optional[Callable] = None
+        self.on_twap: Optional[Callable] = None
 
     async def subscribe_wallet(self, address: str):
         """Subscribe to a wallet address. Creates new connection if needed."""
@@ -73,6 +74,7 @@ class HyperliquidWebSocketPool:
         ws.on_deposit = self.on_deposit
         ws.on_withdrawal = self.on_withdrawal
         ws.on_liquidation = self.on_liquidation
+        ws.on_twap = self.on_twap
 
         # Store connection
         self.connections[address] = ws

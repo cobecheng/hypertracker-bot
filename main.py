@@ -17,7 +17,7 @@ from core.hyperliquid_ws_pool import HyperliquidWebSocketPool
 from core.exchange_liquidations_ws import MultiExchangeLiquidationWS
 from core.models import (
     HyperliquidFill, HyperliquidDeposit, HyperliquidWithdrawal,
-    LiquidationEvent, Wallet
+    HyperliquidTwapOrder, LiquidationEvent, Wallet
 )
 from bot.notifier import Notifier
 from bot.handlers import commands, callbacks
@@ -104,6 +104,7 @@ class HyperTrackerBot:
         self.hyperliquid_ws.on_deposit = self.handle_deposit
         self.hyperliquid_ws.on_withdrawal = self.handle_withdrawal
         self.hyperliquid_ws.on_liquidation = self.handle_hyperliquid_liquidation
+        self.hyperliquid_ws.on_twap = self.handle_twap
 
         self.exchange_liq_ws.on_liquidation = self.handle_exchange_liquidation
         
@@ -182,16 +183,55 @@ class HyperTrackerBot:
     async def handle_withdrawal(self, withdrawal: HyperliquidWithdrawal):
         """Handle withdrawal event from Hyperliquid."""
         logger.debug(f"Withdrawal event for {withdrawal.wallet}: {withdrawal.usd}")
-        
+
         wallets = self.wallet_map.get(withdrawal.wallet, [])
-        
+
         for wallet in wallets:
             # Check if withdrawals are enabled in filters
             from core.models import NotificationType
-            if (wallet.filters.notifications_enabled and 
+            if (wallet.filters.notifications_enabled and
                 NotificationType.WITHDRAWAL in wallet.filters.notify_on):
                 await self.notifier.notify_withdrawal(wallet.user_id, withdrawal, wallet)
-    
+
+    async def handle_twap(self, twap: HyperliquidTwapOrder):
+        """Handle TWAP order event from Hyperliquid."""
+        logger.info(f"TWAP order event for {twap.wallet}: {twap.coin} {twap.side} {twap.sz} (status: {twap.status})")
+
+        # Normalize address to lowercase for matching
+        normalized_address = twap.wallet.lower() if twap.wallet else "unknown"
+
+        # Get all wallets tracking this address
+        wallets = self.wallet_map.get(normalized_address, [])
+        logger.info(f"Found {len(wallets)} wallet(s) tracking address {normalized_address}")
+
+        if not wallets:
+            logger.warning(f"No wallets found for address {normalized_address} - notification will not be sent")
+            return
+
+        for wallet in wallets:
+            logger.info(f"Checking filters for wallet {wallet.id} (user {wallet.user_id}, alias: {wallet.alias})")
+
+            # Check if TWAP notifications are enabled in filters
+            from core.models import NotificationType
+
+            # Check for activated TWAP orders
+            if twap.status == "activated":
+                if (wallet.filters.notifications_enabled and
+                    NotificationType.TWAP in wallet.filters.notify_on):
+                    logger.info(f"TWAP activation notifications enabled! Sending notification to user {wallet.user_id}")
+                    await self.notifier.notify_twap(wallet.user_id, twap, wallet)
+                else:
+                    logger.info(f"TWAP activation notifications not enabled for wallet {wallet.id}")
+
+            # Check for terminated/cancelled TWAP orders
+            elif twap.status == "terminated":
+                if (wallet.filters.notifications_enabled and
+                    NotificationType.TWAP_CANCEL in wallet.filters.notify_on):
+                    logger.info(f"TWAP cancellation notifications enabled! Sending notification to user {wallet.user_id}")
+                    await self.notifier.notify_twap(wallet.user_id, twap, wallet)
+                else:
+                    logger.info(f"TWAP cancellation notifications not enabled for wallet {wallet.id}")
+
     async def handle_hyperliquid_liquidation(self, data: dict):
         """Handle liquidation from Hyperliquid WebSocket."""
         logger.info(f"Hyperliquid liquidation: {data}")

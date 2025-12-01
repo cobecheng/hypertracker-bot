@@ -104,7 +104,7 @@ def get_wallet_edit_keyboard(wallet_id: int) -> InlineKeyboardMarkup:
 def get_notification_types_keyboard(wallet_id: int, current_types: list[NotificationType]) -> InlineKeyboardMarkup:
     """Get keyboard for selecting notification types."""
     builder = InlineKeyboardBuilder()
-    
+
     all_types = [
         (NotificationType.OPEN, "Opens"),
         (NotificationType.CLOSE, "Closes"),
@@ -112,6 +112,8 @@ def get_notification_types_keyboard(wallet_id: int, current_types: list[Notifica
         (NotificationType.LIQUIDATION, "Liquidations"),
         (NotificationType.DEPOSIT, "Deposits"),
         (NotificationType.WITHDRAWAL, "Withdrawals"),
+        (NotificationType.TWAP, "TWAP Orders"),
+        (NotificationType.TWAP_CANCEL, "TWAP Cancellations"),
     ]
     
     for notif_type, label in all_types:
@@ -297,6 +299,8 @@ def get_global_notification_types_keyboard(current_types: list[NotificationType]
         (NotificationType.LIQUIDATION, "Liquidations"),
         (NotificationType.DEPOSIT, "Deposits"),
         (NotificationType.WITHDRAWAL, "Withdrawals"),
+        (NotificationType.TWAP, "TWAP Orders"),
+        (NotificationType.TWAP_CANCEL, "TWAP Cancellations"),
     ]
 
     for notif_type, label in all_types:

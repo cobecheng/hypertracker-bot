@@ -13,7 +13,7 @@ import aiohttp
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from core.models import HyperliquidFill, HyperliquidDeposit, HyperliquidWithdrawal
+from core.models import HyperliquidFill, HyperliquidDeposit, HyperliquidWithdrawal, HyperliquidTwapOrder
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,7 @@ class HyperliquidWebSocket:
         self.on_deposit: Optional[Callable] = None
         self.on_withdrawal: Optional[Callable] = None
         self.on_liquidation: Optional[Callable] = None
+        self.on_twap: Optional[Callable] = None
         
         self._current_delay = reconnect_delay
         self._session: Optional[aiohttp.ClientSession] = None
@@ -221,8 +222,16 @@ class HyperliquidWebSocket:
                 logger.info("Received liquidation event")
                 await self._handle_liquidation_event(event_data["liquidation"])
 
+            elif "twapHistory" in event_data:
+                logger.info("Received twapHistory event (TWAP orders)")
+                await self._handle_twap_orders(event_data, user_address)
+
+            elif "twapSliceFills" in event_data:
+                logger.debug("Received twapSliceFills event (ignoring - only slice fills)")
+                # Ignore slice fills - we only want TWAP order placement notifications
+
             elif "nonUserCancel" in event_data:
-                logger.info("Received nonUserCancel event")
+                logger.debug("Received nonUserCancel event")
                 # Handle non-user cancels if needed
 
             else:
@@ -287,3 +296,62 @@ class HyperliquidWebSocket:
         logger.info(f"Liquidation event: {data}")
         if self.on_liquidation:
             asyncio.create_task(self.on_liquidation(data))
+
+    async def _handle_twap_orders(self, data: dict, user_address: Optional[str] = None):
+        """Handle TWAP orders from twapHistory events."""
+        twap_history = data.get("twapHistory", [])
+
+        for twap_event in twap_history:
+            try:
+                # Extract state and status from the event
+                state = twap_event.get("state", {})
+                status_data = twap_event.get("status", {})
+                twap_id = twap_event.get("twapId")
+
+                # Get user address from state
+                event_user = state.get("user")
+                if not event_user:
+                    # Fallback to user_address parameter
+                    if user_address:
+                        event_user = user_address
+                    elif len(self.subscribed_wallets) == 1:
+                        event_user = list(self.subscribed_wallets)[0]
+                    else:
+                        logger.warning(f"No user address found in TWAP event: {twap_event}")
+                        continue
+
+                logger.info(f"Processing TWAP order: {state.get('coin')} {state.get('side')} {state.get('sz')} for wallet {event_user}")
+
+                # Only notify on "activated" or "terminated" status
+                status = status_data.get("status", "")
+                if status not in ["activated", "terminated"]:
+                    logger.info(f"Skipping TWAP order with status '{status}' (only notifying on 'activated' or 'terminated')")
+                    continue
+
+                twap_order = HyperliquidTwapOrder(
+                    wallet=event_user,
+                    coin=state.get("coin", ""),
+                    side=state.get("side", ""),
+                    sz=state.get("sz", "0"),
+                    time=state.get("time", 0),  # This is in seconds, not milliseconds
+                    minutes=state.get("minutes", 0),
+                    executed_sz=state.get("executedSz", "0.0"),
+                    executed_ntl=state.get("executedNtl", "0.0"),
+                    reduce_only=state.get("reduceOnly", False),
+                    randomize=state.get("randomize", False),
+                    twap_id=twap_id,
+                    status=status
+                )
+
+                logger.info(f"TWAP order parsed: {twap_order.coin} {twap_order.side} {twap_order.sz} over {twap_order.minutes}m for wallet {twap_order.wallet}")
+
+                if self.on_twap:
+                    asyncio.create_task(self.on_twap(twap_order))
+                else:
+                    logger.warning("No on_twap callback registered")
+
+            except Exception as e:
+                logger.error(f"Error parsing TWAP order: {e}")
+                logger.error(f"TWAP event: {twap_event}")
+                import traceback
+                traceback.print_exc()

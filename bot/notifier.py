@@ -12,11 +12,12 @@ from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError
 from config import get_settings
 from core.models import (
     HyperliquidFill, HyperliquidDeposit, HyperliquidWithdrawal,
-    LiquidationEvent, Wallet
+    HyperliquidTwapOrder, LiquidationEvent, Wallet
 )
 from utils.formatting import (
     format_fill_notification, format_deposit_notification,
-    format_withdrawal_notification, format_liquidation_notification
+    format_withdrawal_notification, format_liquidation_notification,
+    format_twap_notification
 )
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,18 @@ class Notifier:
             await self._send_message(chat_id, message, thread_id)
         except Exception as e:
             logger.error(f"Error sending liquidation notification to {user_id}: {e}")
+
+    async def notify_twap(self, user_id: int, twap: HyperliquidTwapOrder, wallet: Wallet):
+        """Send TWAP order notification to user."""
+        if user_id in self._blocked_users:
+            return
+
+        try:
+            message = format_twap_notification(twap, wallet)
+            chat_id, thread_id = self._get_destination(user_id, 'trades')
+            await self._send_message(chat_id, message, thread_id)
+        except Exception as e:
+            logger.error(f"Error sending TWAP notification to {user_id}: {e}")
     
     async def _send_message(self, chat_id: int, text: str, message_thread_id: Optional[int] = None):
         """

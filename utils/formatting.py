@@ -4,7 +4,7 @@ Message formatting utilities for beautiful Telegram notifications.
 from datetime import datetime
 from typing import Optional
 
-from core.models import HyperliquidFill, LiquidationEvent, Wallet
+from core.models import HyperliquidFill, HyperliquidTwapOrder, LiquidationEvent, Wallet
 from utils.filters import format_address
 
 
@@ -278,6 +278,115 @@ def format_withdrawal_notification(wallet: Wallet, amount: str, timestamp: int, 
         lines.append("")
         lines.append(f"Tx → https://hypurrscan.io/tx/{tx_hash}")
     
+    return "\n".join(lines)
+
+
+def format_twap_notification(twap: HyperliquidTwapOrder, wallet: Wallet) -> str:
+    """
+    Format a TWAP order event into a beautiful Telegram message.
+
+    Args:
+        twap: The TWAP order event
+        wallet: The wallet configuration (for alias)
+
+    Returns:
+        Formatted message string with emojis
+    """
+    # Different header based on status
+    if twap.status == "terminated":
+        header = "🛑 TWAP ORDER CANCELLED"
+    else:
+        header = "⏱️ TWAP ORDER PLACED"
+
+    # Wallet info - make address clickable for easy copying
+    wallet_name = wallet.alias if wallet.alias else format_address(wallet.address)
+    wallet_line = f"Wallet: {wallet_name} (`{wallet.address}`)"
+
+    # Determine side
+    is_buy = twap.side == "B"
+    side_emoji = "🟩" if is_buy else "🟥"
+    side_text = "Buy" if is_buy else "Sell"
+
+    side_line = f"{side_emoji} {side_text} {twap.coin}"
+
+    # Size
+    try:
+        size = float(twap.sz)
+        size_line = f"📦 Total Size: {size:,.2f} {twap.coin}"
+    except (ValueError, TypeError):
+        size_line = f"📦 Total Size: {twap.sz} {twap.coin}"
+
+    # Duration (in minutes)
+    duration_line = ""
+    if twap.minutes > 0:
+        if twap.minutes >= 60:
+            duration_str = f"{twap.minutes / 60:.1f}h"
+        else:
+            duration_str = f"{twap.minutes}m"
+        duration_line = f"⏰ Duration: {duration_str}"
+
+    # Reduce only flag
+    reduce_only_line = ""
+    if twap.reduce_only:
+        reduce_only_line = "🔒 Reduce Only: Yes"
+
+    # Randomize flag
+    randomize_line = ""
+    if twap.randomize:
+        randomize_line = "🎲 Randomize: Yes"
+
+    # TWAP ID
+    twap_id_line = ""
+    if twap.twap_id:
+        twap_id_line = f"🆔 TWAP ID: {twap.twap_id}"
+
+    # Execution stats (for terminated orders)
+    execution_line = ""
+    if twap.status == "terminated":
+        try:
+            executed_sz = float(twap.executed_sz)
+            total_sz = float(twap.sz)
+            if total_sz > 0:
+                execution_pct = (executed_sz / total_sz) * 100
+                execution_line = f"📊 Executed: {executed_sz:,.2f} / {total_sz:,.2f} {twap.coin} ({execution_pct:.1f}%)"
+            else:
+                execution_line = f"📊 Executed: {executed_sz:,.2f} {twap.coin}"
+        except (ValueError, TypeError):
+            execution_line = f"📊 Executed: {twap.executed_sz} / {twap.sz} {twap.coin}"
+
+    # Timestamp (time is in seconds, not milliseconds)
+    try:
+        timestamp = datetime.fromtimestamp(twap.time)
+        time_line = f"🕒 {timestamp.strftime('%d/%m/%Y, %I:%M:%S %p')} UTC"
+    except:
+        time_line = f"🕒 {twap.time}"
+
+    # Assemble message
+    lines = [
+        header,
+        wallet_line,
+        "",
+        side_line,
+        size_line,
+    ]
+
+    if execution_line:
+        lines.append(execution_line)
+
+    if duration_line:
+        lines.append(duration_line)
+
+    if reduce_only_line:
+        lines.append(reduce_only_line)
+
+    if randomize_line:
+        lines.append(randomize_line)
+
+    if twap_id_line:
+        lines.append(twap_id_line)
+
+    lines.append(time_line)
+
     return "\n".join(lines)
 
 
