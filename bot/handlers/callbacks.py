@@ -112,30 +112,31 @@ async def callback_wallet_detail(callback: CallbackQuery):
     # Format wallet info
     status = "✅ Active" if wallet.active else "❌ Inactive"
     notifications = "🔔 Enabled" if wallet.filters.notifications_enabled else "🔕 Disabled"
-    
-    notify_types = ", ".join([nt.value.title() for nt in wallet.filters.notify_on]) if wallet.filters.notify_on else "None"
+
+    # Replace underscores with spaces for notification types to avoid Markdown conflicts
+    notify_types = ", ".join([nt.value.replace("_", " ").title() for nt in wallet.filters.notify_on]) if wallet.filters.notify_on else "None"
     assets = ", ".join(wallet.filters.assets) if wallet.filters.assets else "All"
-    
+
     info_text = f"""
-🔍 **Wallet Details**
+🔍 <b>Wallet Details</b>
 
-**Name:** {wallet.alias if wallet.alias else 'No alias'}
-**Address:** `{wallet.address}`
-**Status:** {status}
-**Notifications:** {notifications}
+<b>Name:</b> {wallet.alias if wallet.alias else 'No alias'}
+<b>Address:</b> <code>{wallet.address}</code>
+<b>Status:</b> {status}
+<b>Notifications:</b> {notifications}
 
-**Filters:**
+<b>Filters:</b>
 • Types: {notify_types}
 • Assets: {assets}
 • Order Type: {wallet.filters.order_type.value.title()}
 • Direction: {wallet.filters.direction.value.title()}
 • Min Notional: ${wallet.filters.min_notional_usd:,.2f}
 """
-    
+
     await callback.message.edit_text(
         info_text,
         reply_markup=get_wallet_detail_keyboard(wallet_id),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     await callback.answer()
 
@@ -544,29 +545,29 @@ async def callback_global_settings(callback: CallbackQuery):
     if settings.global_wallet_filters:
         filters = settings.global_wallet_filters
 
-        # Format notification types
-        notify_types = ", ".join([t.value for t in filters.notify_on]) if filters.notify_on else "None"
+        # Format notification types - replace underscores with spaces
+        notify_types = ", ".join([t.value.replace("_", " ").title() for t in filters.notify_on]) if filters.notify_on else "None"
 
         # Format assets
         assets = ", ".join(filters.assets) if filters.assets else "All"
 
         text = f"""
-⚙️ **Global Wallet Filter Settings**
+⚙️ <b>Global Wallet Filter Settings</b>
 
 These filters apply to all wallets by default. Individual wallet filters will override these settings.
 
-**Status:** {"🔔 Enabled" if filters.notifications_enabled else "🔕 Disabled"}
-**Notify On:** {notify_types}
-**Assets:** {assets}
-**Order Type:** {filters.order_type.value}
-**Direction:** {filters.direction.value}
-**Min Notional:** ${filters.min_notional_usd:,.2f}
+<b>Status:</b> {"🔔 Enabled" if filters.notifications_enabled else "🔕 Disabled"}
+<b>Notify On:</b> {notify_types}
+<b>Assets:</b> {assets}
+<b>Order Type:</b> {filters.order_type.value}
+<b>Direction:</b> {filters.direction.value}
+<b>Min Notional:</b> ${filters.min_notional_usd:,.2f}
 
 Choose an option below:
 """
     else:
         text = """
-⚙️ **Global Wallet Filter Settings**
+⚙️ <b>Global Wallet Filter Settings</b>
 
 You haven't set global filters yet. Global filters apply to all wallets by default, unless a wallet has individual filters configured.
 
@@ -580,7 +581,8 @@ Choose an option below:
 
     await callback.message.edit_text(
         text,
-        reply_markup=get_global_settings_keyboard(settings.global_wallet_filters is not None)
+        reply_markup=get_global_settings_keyboard(settings.global_wallet_filters is not None),
+        parse_mode="HTML"
     )
     await callback.answer()
 

@@ -9,7 +9,11 @@
       "Bash(sqlite3:*)",
       "Bash(kill:*)",
       "Bash(wscat:*)",
-      "Bash(python test_binance_liq.py:*)"
+      "Bash(python test_binance_liq.py:*)",
+      "Bash(chmod:*)",
+      "Bash(python3:*)",
+      "Bash(python -c:*)",
+      "Bash(python migrate_enable_twap.py:*)"
     ],
     "deny": [],
     "ask": []
