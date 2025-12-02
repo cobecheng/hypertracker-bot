@@ -14,6 +14,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from core.models import HyperliquidFill, HyperliquidDeposit, HyperliquidWithdrawal, HyperliquidTwapOrder
+from utils.spot_assets import get_spot_mapper
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class HyperliquidWebSocket:
         
         self._current_delay = reconnect_delay
         self._session: Optional[aiohttp.ClientSession] = None
+        self._spot_mapper = get_spot_mapper(rest_url)
     
     async def start(self):
         """Start the WebSocket connection with auto-reconnect."""
@@ -263,11 +265,15 @@ class HyperliquidWebSocket:
 
         for fill_data in fills:
             try:
-                logger.info(f"Processing fill: {fill_data.get('coin')} {fill_data.get('side')} {fill_data.get('sz')} for wallet {user_address}")
+                raw_coin = fill_data.get("coin", "")
+                logger.info(f"Processing fill: {raw_coin} {fill_data.get('side')} {fill_data.get('sz')} for wallet {user_address}")
+
+                # Resolve spot asset names (@107 -> HYPE)
+                coin_name = await self._spot_mapper.get_asset_name(raw_coin)
 
                 fill = HyperliquidFill(
                     wallet=user_address,
-                    coin=fill_data.get("coin", ""),
+                    coin=coin_name,  # Use resolved name
                     side=fill_data.get("side", ""),
                     px=fill_data.get("px", "0"),
                     sz=fill_data.get("sz", "0"),
@@ -320,7 +326,8 @@ class HyperliquidWebSocket:
                         logger.warning(f"No user address found in TWAP event: {twap_event}")
                         continue
 
-                logger.info(f"Processing TWAP order: {state.get('coin')} {state.get('side')} {state.get('sz')} for wallet {event_user}")
+                raw_coin = state.get("coin", "")
+                logger.info(f"Processing TWAP order: {raw_coin} {state.get('side')} {state.get('sz')} for wallet {event_user}")
 
                 # Only notify on "activated" or "terminated" status
                 status = status_data.get("status", "")
@@ -328,9 +335,12 @@ class HyperliquidWebSocket:
                     logger.info(f"Skipping TWAP order with status '{status}' (only notifying on 'activated' or 'terminated')")
                     continue
 
+                # Resolve spot asset names (@107 -> HYPE)
+                coin_name = await self._spot_mapper.get_asset_name(raw_coin)
+
                 twap_order = HyperliquidTwapOrder(
                     wallet=event_user,
-                    coin=state.get("coin", ""),
+                    coin=coin_name,
                     side=state.get("side", ""),
                     sz=state.get("sz", "0"),
                     time=state.get("time", 0),  # This is in seconds, not milliseconds

@@ -34,8 +34,10 @@ class Settings(BaseSettings):
     # Performance Settings
     ws_reconnect_delay: int = 1
     ws_max_reconnect_delay: int = 60
-    ws_ping_interval: int = 20
-    ws_ping_timeout: int = 10
+    # Increase ping timeout to prevent premature disconnections
+    # Hyperliquid may take longer than 10s to respond under load
+    ws_ping_interval: int = 30
+    ws_ping_timeout: int = 20
     
     # Logging
     log_level: str = "INFO"

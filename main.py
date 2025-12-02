@@ -80,7 +80,14 @@ class HyperTrackerBot:
 
         self.dp.include_router(commands.router)
         self.dp.include_router(callbacks.router)
-        
+
+        # Initialize spot asset mapper and fetch metadata
+        # This will be used by WebSocket clients to resolve @107 -> HYPE
+        logger.info("Initializing spot asset mapper...")
+        from utils.spot_assets import get_spot_mapper
+        spot_mapper = get_spot_mapper(self.settings.hyperliquid_rest_url)
+        await spot_mapper.initialize()
+
         # Initialize WebSocket connection pool (one connection per user)
         self.hyperliquid_ws = HyperliquidWebSocketPool(
             ws_url=self.settings.hyperliquid_ws_url,
@@ -127,12 +134,37 @@ class HyperTrackerBot:
                 self.wallet_map[normalized_address] = []
             self.wallet_map[normalized_address].append(wallet)
 
-        # Subscribe to unique addresses
-        for address in self.wallet_map.keys():
-            await self.hyperliquid_ws.subscribe_wallet(address)
+        # Check if we're exceeding Hyperliquid's API limit
+        unique_addresses = list(self.wallet_map.keys())
+        max_allowed = self.hyperliquid_ws.MAX_USERS_PER_IP
 
-        logger.info(f"Subscribed to {len(self.wallet_map)} unique wallet addresses")
-        logger.info(f"Wallet addresses in map: {list(self.wallet_map.keys())}")
+        if len(unique_addresses) > max_allowed:
+            logger.warning(
+                f"⚠️  WARNING: {len(unique_addresses)} unique wallet addresses configured, "
+                f"but Hyperliquid API limits to {max_allowed} per IP address. "
+                f"Only the first {max_allowed} wallets will be monitored."
+            )
+            # Only subscribe to the first MAX_USERS_PER_IP addresses
+            unique_addresses = unique_addresses[:max_allowed]
+
+        # Subscribe to unique addresses (up to API limit)
+        subscribed_count = 0
+        failed_addresses = []
+
+        for address in unique_addresses:
+            try:
+                await self.hyperliquid_ws.subscribe_wallet(address)
+                subscribed_count += 1
+            except ValueError as e:
+                logger.error(f"Failed to subscribe to {address}: {e}")
+                failed_addresses.append(address)
+
+        logger.info(f"✓ Successfully subscribed to {subscribed_count}/{len(self.wallet_map)} unique wallet addresses")
+
+        if failed_addresses:
+            logger.warning(f"✗ Failed to subscribe to {len(failed_addresses)} addresses: {failed_addresses}")
+
+        logger.info(f"Wallet addresses being monitored: {unique_addresses[:subscribed_count]}")
     
     async def handle_fill(self, fill: HyperliquidFill):
         """Handle fill event from Hyperliquid."""
@@ -141,17 +173,17 @@ class HyperTrackerBot:
         # Normalize address to lowercase for matching
         normalized_address = fill.wallet.lower() if fill.wallet else "unknown"
 
-        # Get all wallets tracking this address
+        # Get all wallets (tracking configurations) for this address
         wallets = self.wallet_map.get(normalized_address, [])
-        logger.info(f"Found {len(wallets)} wallet(s) tracking address {normalized_address}")
+        logger.info(f"Found {len(wallets)} user(s) tracking address {normalized_address}")
         logger.info(f"Current wallet_map keys: {list(self.wallet_map.keys())}")
 
         if not wallets:
-            logger.warning(f"No wallets found for address {normalized_address} - notification will not be sent")
+            logger.warning(f"No users found tracking address {normalized_address} - notification will not be sent")
             return
 
         for wallet in wallets:
-            logger.info(f"Checking filters for wallet {wallet.id} (user {wallet.user_id}, alias: {wallet.alias})")
+            logger.info(f"Checking filters for user {wallet.user_id} (wallet_id: {wallet.id}, alias: {wallet.alias})")
 
             # Get user's global filters
             user_settings = await self.db.get_user_settings(wallet.user_id)

@@ -19,7 +19,12 @@ class HyperliquidWebSocketPool:
     This is necessary because Hyperliquid's WebSocket API doesn't include
     the user address in userEvents messages, making it impossible to multiplex
     multiple users on a single connection.
+
+    IMPORTANT: Hyperliquid API limits to 10 unique user addresses per IP.
     """
+
+    # Hyperliquid API limit: 10 unique users per IP address
+    MAX_USERS_PER_IP = 10
 
     def __init__(
         self,
@@ -56,6 +61,17 @@ class HyperliquidWebSocketPool:
         if address in self.connections:
             logger.info(f"Wallet {address} already has an active connection")
             return
+
+        # Check API limit: 10 unique users per IP
+        if len(self.connections) >= self.MAX_USERS_PER_IP:
+            logger.error(
+                f"Cannot subscribe to {address}: Hyperliquid API limits to {self.MAX_USERS_PER_IP} "
+                f"unique user addresses per IP. Currently tracking {len(self.connections)} addresses."
+            )
+            raise ValueError(
+                f"Hyperliquid API limit reached: Cannot track more than {self.MAX_USERS_PER_IP} "
+                f"wallet addresses per IP. Currently tracking: {len(self.connections)}"
+            )
 
         logger.info(f"Creating new WebSocket connection for {address}")
 
