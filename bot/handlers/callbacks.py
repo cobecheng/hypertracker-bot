@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+# Global reference to liquidation statistics (set by main.py)
+liq_stats = None
+
 
 @router.callback_query(F.data == "main_menu")
 async def callback_main_menu(callback: CallbackQuery, state: FSMContext):
@@ -428,14 +431,78 @@ async def callback_toggle_liq_monitor(callback: CallbackQuery):
     """Toggle liquidation monitoring."""
     settings = await db.get_user_settings(callback.from_user.id)
     settings.liquidation_filters.enabled = not settings.liquidation_filters.enabled
-    
+
     await db.update_liquidation_settings(callback.from_user.id, settings.liquidation_filters)
-    
+
     status = "enabled" if settings.liquidation_filters.enabled else "disabled"
     await callback.answer(f"✅ Liquidation alerts {status}", show_alert=True)
-    
+
     # Refresh view
     await callback_liquidations(callback)
+
+
+@router.callback_query(F.data == "liq_stats")
+async def callback_liq_stats(callback: CallbackQuery):
+    """Show liquidation statistics for the last hour."""
+    from datetime import datetime, timedelta
+
+    if liq_stats is None:
+        await callback.answer("❌ Statistics not available", show_alert=True)
+        return
+
+    # Build statistics message
+    message_lines = ["📊 **Liquidation Statistics (Last Hour)**\n"]
+
+    total_received = 0
+    total_sent = 0
+
+    for venue in ['Binance', 'Bybit', 'Gate.io']:
+        if venue in liq_stats:
+            stats = liq_stats[venue]
+
+            # Calculate time since last reset
+            time_since_reset = datetime.now() - stats['last_reset']
+            minutes_ago = int(time_since_reset.total_seconds() / 60)
+
+            total = stats['total']
+            sent = stats['sent']
+            filtered = total - sent
+
+            total_received += total
+            total_sent += sent
+
+            # Format percentage
+            sent_pct = (sent / total * 100) if total > 0 else 0
+
+            message_lines.append(
+                f"\n**{venue}**\n"
+                f"├ Total received: {total:,}\n"
+                f"├ Sent to you: {sent:,} ({sent_pct:.1f}%)\n"
+                f"└ Filtered out: {filtered:,}\n"
+            )
+
+    # Add summary
+    total_filtered = total_received - total_sent
+    message_lines.append(
+        f"\n**Summary**\n"
+        f"├ Total across all venues: {total_received:,}\n"
+        f"├ Notifications sent: {total_sent:,}\n"
+        f"└ Filtered out: {total_filtered:,}\n"
+    )
+
+    # Add note about hourly reset
+    message_lines.append(
+        f"\n_Stats reset hourly per venue_\n"
+        f"_Filtered = below your min notional or wrong venue/pair_"
+    )
+
+    await callback.message.edit_text(
+        "\n".join(message_lines),
+        reply_markup=get_liquidation_settings_keyboard(
+            (await db.get_user_settings(callback.from_user.id)).liquidation_filters.enabled
+        )
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "edit_liq_venues")

@@ -3,9 +3,9 @@ HyperTracker Bot - Main Entry Point
 Real-time Hyperliquid wallet tracking and cross-venue liquidation monitoring.
 """
 import asyncio
-import logging
 import sys
 import time
+from datetime import datetime
 from typing import Dict
 
 from aiogram import Bot, Dispatcher
@@ -22,17 +22,13 @@ from core.models import (
 from bot.notifier import Notifier
 from bot.handlers import commands, callbacks
 from utils.filters import should_notify_fill, should_notify_liquidation
+from utils.logging_config import setup_logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('hypertracker.log')
-    ]
-)
-logger = logging.getLogger(__name__)
+# Configure advanced logging system
+loggers = setup_logging(log_level="INFO")
+logger = loggers['system']
+liquidations_logger = loggers['liquidations']
+fills_logger = loggers['fills']
 
 
 class HyperTrackerBot:
@@ -54,9 +50,16 @@ class HyperTrackerBot:
         
         # Wallet tracking
         self.wallet_map: Dict[str, list[Wallet]] = {}  # address -> list of wallets
-        
+
         # Start time for uptime tracking
         self.start_time = time.time()
+
+        # Liquidation statistics tracking (last hour)
+        self.liq_stats = {
+            'Binance': {'total': 0, 'sent': 0, 'last_reset': datetime.now()},
+            'Bybit': {'total': 0, 'sent': 0, 'last_reset': datetime.now()},
+            'Gate.io': {'total': 0, 'sent': 0, 'last_reset': datetime.now()},
+        }
     
     async def setup(self):
         """Setup all components."""
@@ -77,6 +80,7 @@ class HyperTrackerBot:
         commands.start_time = self.start_time
         commands.reload_wallets_callback = self.load_active_wallets
         callbacks.db = self.db
+        callbacks.liq_stats = self.liq_stats  # Share liquidation stats with handlers
 
         self.dp.include_router(commands.router)
         self.dp.include_router(callbacks.router)
@@ -168,7 +172,8 @@ class HyperTrackerBot:
     
     async def handle_fill(self, fill: HyperliquidFill):
         """Handle fill event from Hyperliquid."""
-        logger.info(f"Fill event for {fill.wallet}: {fill.coin} {fill.side} {fill.sz}")
+        # Log to dedicated fills log file
+        fills_logger.info(f"{fill.wallet[:10]}... {fill.coin} {fill.side} {fill.sz} @ ${fill.px}")
 
         # Normalize address to lowercase for matching
         normalized_address = fill.wallet.lower() if fill.wallet else "unknown"
@@ -265,20 +270,77 @@ class HyperTrackerBot:
                     logger.info(f"TWAP cancellation notifications not enabled for wallet {wallet.id}")
 
     async def handle_hyperliquid_liquidation(self, data: dict):
-        """Handle liquidation from Hyperliquid WebSocket."""
-        logger.info(f"Hyperliquid liquidation: {data}")
-        # This can be processed similar to Chaos Labs liquidations
-        # For now, we'll let Chaos Labs handle cross-venue liquidations
+        """
+        Handle liquidation from Hyperliquid WebSocket.
+        Converts Hyperliquid liquidation format to LiquidationEvent and routes to users.
+
+        Hyperliquid format:
+        {
+            "lid": int,
+            "liquidator": str (address),
+            "liquidated_user": str (address),
+            "liquidated_ntl_pos": str (notional position value),
+            "liquidated_account_value": str (account value at liquidation)
+        }
+        """
+        try:
+            logger.info(f"Hyperliquid liquidation event: {data}")
+
+            # Extract fields from Hyperliquid format
+            liquidated_user = data.get("liquidated_user", "")
+            liquidated_ntl_pos = abs(float(data.get("liquidated_ntl_pos", 0)))
+            account_value = float(data.get("liquidated_account_value", 0))
+
+            # Determine direction from notional position (negative = short, positive = long)
+            raw_ntl_pos = float(data.get("liquidated_ntl_pos", 0))
+            direction = "short" if raw_ntl_pos < 0 else "long"
+
+            # Create LiquidationEvent
+            liquidation = LiquidationEvent(
+                venue="Hyperliquid",
+                pair="UNKNOWN",  # Hyperliquid doesn't specify pair in liquidation event
+                direction=direction,
+                size=0.0,  # Not available in liquidation event
+                notional_usd=liquidated_ntl_pos,
+                liquidation_price=0.0,  # Not available in liquidation event
+                address=liquidated_user,
+                tx_hash=None,
+                timestamp=datetime.now()
+            )
+
+            logger.info(f"Hyperliquid liquidation: {direction} ${liquidated_ntl_pos:,.0f} (user: {liquidated_user})")
+
+            # Route to exchange liquidation handler (same as CEX liquidations)
+            await self.handle_exchange_liquidation(liquidation)
+
+        except Exception as e:
+            logger.error(f"Error handling Hyperliquid liquidation: {e}")
+            logger.debug(f"Data: {data}")
     
     async def handle_exchange_liquidation(self, liquidation: LiquidationEvent):
         """Handle liquidation event from exchange feeds (Binance, Bybit, etc.)."""
-        logger.info(f"Liquidation: {liquidation.venue} {liquidation.pair} ${liquidation.notional_usd:,.0f}")
+        # Log to dedicated liquidations log file
+        liquidations_logger.info(f"{liquidation.venue} {liquidation.pair} {liquidation.direction} ${liquidation.notional_usd:,.0f}")
+
+        # Update statistics - track total liquidations received
+        venue = liquidation.venue
+        if venue in self.liq_stats:
+            # Reset stats if more than 1 hour has passed
+            now = datetime.now()
+            if (now - self.liq_stats[venue]['last_reset']).total_seconds() > 3600:
+                self.liq_stats[venue]['total'] = 0
+                self.liq_stats[venue]['sent'] = 0
+                self.liq_stats[venue]['last_reset'] = now
+
+            # Increment total count (includes filtered out)
+            self.liq_stats[venue]['total'] += 1
 
         # Get all users from database
         # Note: For optimization with many users, maintain an in-memory cache
         # of users with liquidation monitoring enabled
         all_users = await self.db.get_all_users()
 
+        notification_sent = False
         for user in all_users:
             # Get user settings
             user_settings = await self.db.get_user_settings(user.telegram_id)
@@ -291,6 +353,11 @@ class HyperTrackerBot:
             if should_notify_liquidation(liquidation, user_settings.liquidation_filters):
                 logger.info(f"Sending liquidation notification to user {user.telegram_id}")
                 await self.notifier.notify_liquidation(user.telegram_id, liquidation)
+                notification_sent = True
+
+        # Update sent count if at least one notification was sent
+        if notification_sent and venue in self.liq_stats:
+            self.liq_stats[venue]['sent'] += 1
     
     async def start(self):
         """Start the bot and all background tasks."""

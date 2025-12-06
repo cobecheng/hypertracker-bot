@@ -202,12 +202,16 @@ def get_confirm_remove_keyboard(wallet_id: int) -> InlineKeyboardMarkup:
 def get_liquidation_settings_keyboard(enabled: bool) -> InlineKeyboardMarkup:
     """Get keyboard for liquidation monitoring settings."""
     builder = InlineKeyboardBuilder()
-    
+
     toggle_text = "🔕 Disable Alerts" if enabled else "🔔 Enable Alerts"
     builder.row(
         InlineKeyboardButton(text=toggle_text, callback_data="toggle_liq_monitor")
     )
-    
+
+    builder.row(
+        InlineKeyboardButton(text="📊 Hourly Statistics", callback_data="liq_stats")
+    )
+
     builder.row(
         InlineKeyboardButton(text="🏢 Select Venues", callback_data="edit_liq_venues")
     )
@@ -220,16 +224,17 @@ def get_liquidation_settings_keyboard(enabled: bool) -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="🔙 Back to Menu", callback_data="main_menu")
     )
-    
+
     return builder.as_markup()
 
 
 def get_venues_keyboard(selected_venues: list[str]) -> InlineKeyboardMarkup:
     """Get keyboard for selecting liquidation venues."""
     builder = InlineKeyboardBuilder()
-    
-    all_venues = ["Hyperliquid", "Lighter", "Binance", "Bybit", "OKX", "gTrade"]
-    
+
+    # Only show active liquidation feed venues
+    all_venues = ["Binance", "Bybit", "Gate.io"]
+
     for venue in all_venues:
         is_selected = venue in selected_venues
         checkbox = "✅" if is_selected else "☐"
@@ -239,11 +244,11 @@ def get_venues_keyboard(selected_venues: list[str]) -> InlineKeyboardMarkup:
                 callback_data=f"toggle_venue:{venue}"
             )
         )
-    
+
     builder.row(
         InlineKeyboardButton(text="🔙 Back", callback_data="liquidations")
     )
-    
+
     return builder.as_markup()
 
 

@@ -56,8 +56,8 @@ class Wallet(BaseModel):
 
 class LiquidationFilters(BaseModel):
     """Liquidation monitoring filters."""
-    enabled: bool = False
-    venues: List[str] = Field(default_factory=lambda: ["Hyperliquid", "Lighter", "Binance", "Bybit", "OKX", "gTrade"])
+    enabled: bool = True  # Enabled by default
+    venues: List[str] = Field(default_factory=lambda: ["Binance", "Bybit", "Gate.io"])  # Active liquidation feeds
     pairs: Optional[List[str]] = None  # None = all pairs
     min_notional_usd: float = 50000.0
 
