@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # Leave empty to send to user's private chat
     trades_chat_id: Optional[str] = None
     liquidations_chat_id: Optional[str] = None
+    ca_tracking_chat_id: Optional[str] = None  # For EVM contract tracking alerts
 
     # Database Configuration
     database_path: str = "./data/hypertracker.db"
@@ -41,7 +42,12 @@ class Settings(BaseSettings):
     
     # Logging
     log_level: str = "INFO"
-    
+
+    # EVM Tracking (Alchemy)
+    alchemy_api_key: Optional[str] = None
+    alchemy_signing_key: Optional[str] = None  # Webhook signing key from Alchemy dashboard
+    alchemy_network: str = "eth-mainnet"  # eth-mainnet, eth-sepolia, polygon-mainnet, etc.
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

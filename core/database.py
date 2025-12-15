@@ -10,6 +10,7 @@ from typing import List, Optional
 import aiosqlite
 
 from core.models import Wallet, WalletFilters, UserSettings, LiquidationFilters
+from core.evm_models import TrackedAddress, AddressType
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,37 @@ class Database:
 
         await self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_wallets_active ON wallets(active)
+        """)
+
+        # EVM tracking table
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS evm_tracked_addresses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                address TEXT NOT NULL,
+                label TEXT NOT NULL,
+                address_type TEXT NOT NULL,
+                token_contract TEXT,
+                token_symbol TEXT,
+                min_value_usd REAL NOT NULL DEFAULT 0.0,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(telegram_id),
+                UNIQUE(user_id, address)
+            )
+        """)
+
+        # EVM indexes
+        await self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_evm_address ON evm_tracked_addresses(address)
+        """)
+
+        await self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_evm_active ON evm_tracked_addresses(active)
+        """)
+
+        await self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_evm_user_id ON evm_tracked_addresses(user_id)
         """)
 
         await self.conn.commit()
@@ -317,6 +349,129 @@ class Database:
             logger.error(f"Error getting all users: {e}")
             return []
 
+    # EVM tracking operations
+    async def add_evm_address(self, tracked_address: TrackedAddress) -> Optional[int]:
+        """Add a new EVM address to track. Returns address ID or None on error."""
+        try:
+            cursor = await self.conn.execute("""
+                INSERT INTO evm_tracked_addresses (
+                    user_id, address, label, address_type, token_contract,
+                    token_symbol, min_value_usd, active, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                tracked_address.user_id,
+                tracked_address.address.lower(),  # Store lowercase for consistency
+                tracked_address.label,
+                tracked_address.address_type.value,
+                tracked_address.token_contract.lower() if tracked_address.token_contract else None,
+                tracked_address.token_symbol,
+                tracked_address.min_value_usd,
+                int(tracked_address.active),
+                datetime.utcnow().isoformat()
+            ))
+            await self.conn.commit()
+            return cursor.lastrowid
+        except aiosqlite.IntegrityError:
+            logger.warning(f"Address {tracked_address.address} already tracked by user {tracked_address.user_id}")
+            return None
+        except Exception as e:
+            logger.error(f"Error adding EVM address: {e}")
+            return None
+
+    async def get_user_evm_addresses(self, user_id: int) -> List[TrackedAddress]:
+        """Get all EVM addresses tracked by a user."""
+        cursor = await self.conn.execute("""
+            SELECT * FROM evm_tracked_addresses WHERE user_id = ? ORDER BY created_at DESC
+        """, (user_id,))
+        rows = await cursor.fetchall()
+
+        addresses = []
+        for row in rows:
+            addresses.append(TrackedAddress(
+                id=row['id'],
+                user_id=row['user_id'],
+                address=row['address'],
+                label=row['label'],
+                address_type=AddressType(row['address_type']),
+                token_contract=row['token_contract'],
+                token_symbol=row['token_symbol'],
+                min_value_usd=row['min_value_usd'],
+                active=bool(row['active']),
+                created_at=datetime.fromisoformat(row['created_at'])
+            ))
+        return addresses
+
+    async def get_all_active_evm_addresses(self) -> List[TrackedAddress]:
+        """Get all active EVM addresses across all users."""
+        cursor = await self.conn.execute("""
+            SELECT * FROM evm_tracked_addresses WHERE active = 1
+        """)
+        rows = await cursor.fetchall()
+
+        addresses = []
+        for row in rows:
+            addresses.append(TrackedAddress(
+                id=row['id'],
+                user_id=row['user_id'],
+                address=row['address'],
+                label=row['label'],
+                address_type=AddressType(row['address_type']),
+                token_contract=row['token_contract'],
+                token_symbol=row['token_symbol'],
+                min_value_usd=row['min_value_usd'],
+                active=bool(row['active']),
+                created_at=datetime.fromisoformat(row['created_at'])
+            ))
+        return addresses
+
+    async def get_users_tracking_evm_address(self, address: str) -> List[TrackedAddress]:
+        """Get all users tracking a specific EVM address."""
+        cursor = await self.conn.execute("""
+            SELECT * FROM evm_tracked_addresses WHERE address = ? AND active = 1
+        """, (address.lower(),))
+        rows = await cursor.fetchall()
+
+        addresses = []
+        for row in rows:
+            addresses.append(TrackedAddress(
+                id=row['id'],
+                user_id=row['user_id'],
+                address=row['address'],
+                label=row['label'],
+                address_type=AddressType(row['address_type']),
+                token_contract=row['token_contract'],
+                token_symbol=row['token_symbol'],
+                min_value_usd=row['min_value_usd'],
+                active=bool(row['active']),
+                created_at=datetime.fromisoformat(row['created_at'])
+            ))
+        return addresses
+
+    async def update_evm_address_active(self, address_id: int, active: bool) -> bool:
+        """Toggle EVM address tracking on/off."""
+        try:
+            await self.conn.execute("""
+                UPDATE evm_tracked_addresses SET active = ? WHERE id = ?
+            """, (int(active), address_id))
+            await self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating EVM address active status: {e}")
+            return False
+
+    async def delete_evm_address(self, address_id: int, user_id: int) -> bool:
+        """Delete an EVM tracked address (must belong to user)."""
+        try:
+            cursor = await self.conn.execute("""
+                DELETE FROM evm_tracked_addresses WHERE id = ? AND user_id = ?
+            """, (address_id, user_id))
+            await self.conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error deleting EVM address: {e}")
+            return False
+
     # Statistics
     async def get_stats(self) -> dict:
         """Get bot statistics."""
@@ -329,8 +484,12 @@ class Database:
         cursor = await self.conn.execute("SELECT COUNT(*) as count FROM wallets WHERE active = 1")
         active_wallets = (await cursor.fetchone())['count']
 
+        cursor = await self.conn.execute("SELECT COUNT(*) as count FROM evm_tracked_addresses WHERE active = 1")
+        active_evm_addresses = (await cursor.fetchone())['count']
+
         return {
             'total_users': total_users,
             'total_wallets': total_wallets,
-            'active_wallets': active_wallets
+            'active_wallets': active_wallets,
+            'active_evm_addresses': active_evm_addresses
         }

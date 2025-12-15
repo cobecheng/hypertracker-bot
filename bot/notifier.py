@@ -66,7 +66,7 @@ class Notifier:
 
         Args:
             user_id: User ID to send to if no override configured
-            notification_type: Either 'trades' or 'liquidations'
+            notification_type: Either 'trades', 'liquidations', or 'ca_tracking'
 
         Returns:
             Tuple of (chat_id, message_thread_id)
@@ -83,6 +83,8 @@ class Notifier:
                 chat_id, thread_id = self._parse_chat_destination(self._settings.trades_chat_id)
             elif notification_type == 'liquidations':
                 chat_id, thread_id = self._parse_chat_destination(self._settings.liquidations_chat_id)
+            elif notification_type == 'ca_tracking':
+                chat_id, thread_id = self._parse_chat_destination(self._settings.ca_tracking_chat_id)
             else:
                 chat_id, thread_id = None, None
 
@@ -201,3 +203,20 @@ class Notifier:
         except Exception as e:
             logger.error(f"Error sending message to chat {chat_id}: {e}")
             raise
+
+    async def send_evm_notification(self, user_id: int, message: str):
+        """
+        Send EVM tracking notification to user's CA tracking channel.
+
+        Args:
+            user_id: User ID
+            message: Formatted notification message
+        """
+        if user_id in self._blocked_users:
+            return
+
+        try:
+            chat_id, thread_id = self._get_destination(user_id, 'ca_tracking')
+            await self._send_message(chat_id, message, thread_id)
+        except Exception as e:
+            logger.error(f"Error sending EVM notification to {user_id}: {e}")

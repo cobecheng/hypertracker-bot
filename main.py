@@ -20,7 +20,7 @@ from core.models import (
     HyperliquidTwapOrder, LiquidationEvent, Wallet
 )
 from bot.notifier import Notifier
-from bot.handlers import commands, callbacks
+from bot.handlers import commands, callbacks, evm_commands
 from utils.filters import should_notify_fill, should_notify_liquidation
 from utils.logging_config import setup_logging
 
@@ -82,8 +82,12 @@ class HyperTrackerBot:
         callbacks.db = self.db
         callbacks.liq_stats = self.liq_stats  # Share liquidation stats with handlers
 
+        # Setup EVM tracking handlers
+        evm_commands.db = self.db
+
         self.dp.include_router(commands.router)
         self.dp.include_router(callbacks.router)
+        self.dp.include_router(evm_commands.router)
 
         # Initialize spot asset mapper and fetch metadata
         # This will be used by WebSocket clients to resolve @107 -> HYPE
