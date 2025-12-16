@@ -192,6 +192,8 @@ async def process_evm_address(message: Message, state: FSMContext):
 @router.message(AddEVMAddressStates.waiting_for_label)
 async def process_evm_label(message: Message, state: FSMContext):
     """Store the label and create the tracked address."""
+    from bot.keyboards import get_evm_tracking_keyboard
+
     label = message.text.strip()
 
     if len(label) < 3:
@@ -221,16 +223,18 @@ async def process_evm_label(message: Message, state: FSMContext):
 
     if result:
         await message.answer(
-            f"✅ Successfully added!\n\n"
+            f"✅ **Successfully Added!**\n\n"
             f"Label: {label}\n"
-            f"Address: {address[:10]}...{address[-8:]}\n\n"
-            f"You'll now receive notifications for activity on this address.\n\n"
-            f"Use /list_evm to see all your tracked addresses."
+            f"Address: `{address[:10]}...{address[-8:]}`\n\n"
+            f"You'll now receive notifications for activity on this address.",
+            reply_markup=get_evm_tracking_keyboard(),
+            parse_mode="Markdown"
         )
     else:
         await message.answer(
-            f"ℹ️ This address is already being tracked.\n\n"
-            f"Use /list_evm to see your tracked addresses."
+            f"ℹ️ **Already Tracking**\n\n"
+            f"This address is already being tracked.",
+            reply_markup=get_evm_tracking_keyboard()
         )
 
     await state.clear()

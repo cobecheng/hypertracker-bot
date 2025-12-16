@@ -13,7 +13,7 @@ from bot.keyboards import (
     get_direction_keyboard, get_confirm_remove_keyboard, get_liquidation_settings_keyboard,
     get_venues_keyboard, get_back_to_menu_keyboard, get_global_settings_keyboard,
     get_global_filter_edit_keyboard, get_global_notification_types_keyboard,
-    get_global_order_type_keyboard, get_global_direction_keyboard
+    get_global_order_type_keyboard, get_global_direction_keyboard, get_evm_tracking_keyboard
 )
 from bot.handlers.commands import (
     AddWalletStates, EditWalletStates, EditLiquidationStates, EditGlobalFilterStates, db
@@ -862,3 +862,160 @@ async def callback_edit_global_min_notional(callback: CallbackQuery, state: FSMC
 
     await state.set_state(EditGlobalFilterStates.waiting_for_min_notional)
     await callback.answer()
+
+
+@router.callback_query(F.data == "evm_tracking")
+async def callback_evm_tracking(callback: CallbackQuery):
+    """Show EVM tracking submenu."""
+    addresses = await db.get_user_evm_addresses(callback.from_user.id)
+
+    active_count = sum(1 for addr in addresses if addr.active)
+
+    text = f"""
+🔷 **EVM Transaction Tracking**
+
+Track token transfers, treasury movements, and deployer activities on EVM chains.
+
+**Status:**
+• Tracked addresses: {len(addresses)}
+• Active: {active_count}
+
+Choose an option below:
+"""
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_evm_tracking_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "evm_add_address")
+async def callback_evm_add_address(callback: CallbackQuery, state: FSMContext):
+    """Start add EVM address flow."""
+    from bot.handlers.evm_commands import AddEVMAddressStates
+
+    await callback.message.edit_text(
+        "📝 **Add EVM Address**\n\n"
+        "Send the Ethereum address you want to track:\n\n"
+        "Example: `0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb`\n\n"
+        "This can be:\n"
+        "• Token contract address\n"
+        "• Wallet address (EOA)\n"
+        "• Treasury/deployer address\n\n"
+        "Type /cancel to abort.",
+        parse_mode="Markdown"
+    )
+    await state.set_state(AddEVMAddressStates.waiting_for_address)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "evm_list")
+async def callback_evm_list(callback: CallbackQuery):
+    """List all EVM addresses tracked by the user."""
+    user_id = callback.from_user.id
+
+    addresses = await db.get_user_evm_addresses(user_id)
+
+    if not addresses:
+        await callback.message.edit_text(
+            "📋 **Tracked EVM Addresses**\n\n"
+            "You're not tracking any EVM addresses yet.\n\n"
+            "Click 'Add EVM Address' to start tracking!",
+            reply_markup=get_evm_tracking_keyboard()
+        )
+        await callback.answer()
+        return
+
+    # Group by token
+    tokens = {}
+    for addr in addresses:
+        token = addr.token_symbol or "Custom"
+        if token not in tokens:
+            tokens[token] = []
+        tokens[token].append(addr)
+
+    # Build message
+    lines = ["📋 **Your Tracked EVM Addresses**\n"]
+
+    for token, addr_list in tokens.items():
+        lines.append(f"\n🪙 {token}:")
+        for addr in addr_list:
+            status = "🟢" if addr.active else "🔴"
+            address_short = f"{addr.address[:10]}...{addr.address[-8:]}"
+            lines.append(f"  {status} {addr.label}")
+            lines.append(f"     `{address_short}`")
+
+    lines.append(f"\n\nTotal: {len(addresses)} address(es)")
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=get_evm_tracking_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "evm_stop_tracking")
+async def callback_evm_stop_tracking(callback: CallbackQuery):
+    """Show buttons to stop tracking specific addresses."""
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+    user_id = callback.from_user.id
+
+    addresses = await db.get_user_evm_addresses(user_id)
+
+    if not addresses:
+        await callback.message.edit_text(
+            "❌ **No Tracked Addresses**\n\n"
+            "You're not tracking any EVM addresses.",
+            reply_markup=get_evm_tracking_keyboard()
+        )
+        await callback.answer()
+        return
+
+    # Create inline keyboard with buttons for each address
+    keyboard = []
+    for addr in addresses:
+        if addr.active:
+            address_short = f"{addr.address[:6]}...{addr.address[-4:]}"
+            button_text = f"❌ {addr.label} ({address_short})"
+            callback_data = f"stop_evm:{addr.id}"
+            keyboard.append([InlineKeyboardButton(text=button_text, callback_data=callback_data)])
+
+    if not keyboard:
+        await callback.message.edit_text(
+            "ℹ️ **All Inactive**\n\n"
+            "All your tracked addresses are already inactive.",
+            reply_markup=get_evm_tracking_keyboard()
+        )
+        await callback.answer()
+        return
+
+    # Add back button
+    keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="evm_tracking")])
+
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    await callback.message.edit_text(
+        "❌ **Stop Tracking**\n\n"
+        "Select an address to stop tracking:",
+        reply_markup=markup
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("stop_evm:"))
+async def callback_stop_evm_confirm(callback: CallbackQuery):
+    """Handle stop tracking callback."""
+    address_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+
+    # Delete the address
+    success = await db.delete_evm_address(address_id, user_id)
+
+    if success:
+        await callback.answer("✅ Stopped tracking", show_alert=True)
+        # Refresh the EVM tracking menu
+        await callback_evm_tracking(callback)
+    else:
+        await callback.answer("❌ Error stopping tracking", show_alert=True)

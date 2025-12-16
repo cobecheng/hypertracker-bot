@@ -402,29 +402,31 @@ async def process_token_transfer(activity: dict, eth_transfers: list = None):
     tx_hash = activity.get("hash", "")
     block_num = activity.get("blockNum", "0x0")
 
-    # Deduplication: Check if we've already processed this transaction recently
+    # Get token contract details for deduplication key
+    raw_contract = activity.get("rawContract", {})
+    token_address = raw_contract.get("address", "").lower()
+
+    # Deduplication: Check if we've already processed this specific transfer
+    # Use tx_hash + token_address as key since a transaction can have multiple token transfers
     current_time = time.time()
+    dedup_key = f"{tx_hash}:{token_address}"
 
     # Clean up old entries from cache (older than DEDUP_WINDOW_SECONDS)
-    expired_txs = [tx for tx, timestamp in _processed_transactions.items()
+    expired_txs = [key for key, timestamp in _processed_transactions.items()
                    if current_time - timestamp > _DEDUP_WINDOW_SECONDS]
-    for tx in expired_txs:
-        del _processed_transactions[tx]
+    for key in expired_txs:
+        del _processed_transactions[key]
 
-    # Check if this transaction was already processed
-    if tx_hash in _processed_transactions:
-        logger.info(f"⏭️  Skipping duplicate transaction: {tx_hash[:10]}... (already processed)")
+    # Check if this specific transfer was already processed
+    if dedup_key in _processed_transactions:
+        logger.info(f"⏭️  Skipping duplicate transfer: {tx_hash[:10]}... token {token_address[:10]}... (already processed)")
         return
 
-    # Mark this transaction as processed
-    _processed_transactions[tx_hash] = current_time
+    # Mark this transfer as processed
+    _processed_transactions[dedup_key] = current_time
 
     # Log the full activity for debugging
     logger.debug(f"Full activity data: {json.dumps(activity, indent=2)}")
-
-    # Get token contract details
-    raw_contract = activity.get("rawContract", {})
-    token_address = raw_contract.get("address", "").lower()
 
     # Alchemy sends rawValue (hex string) in rawContract
     raw_value = raw_contract.get("rawValue", "0x0")
@@ -527,19 +529,55 @@ async def process_token_transfer(activity: dict, eth_transfers: list = None):
         # Find all transfers involving the tracked wallet (from_address or to_address)
         # A swap has: user sends token A, user receives token B
 
-        user_wallet = from_address if from_address != to_address else to_address
+        # Determine which address is the user's wallet
+        # The most reliable way is to check which address is actually being tracked in the database
+        user_wallet = to_address  # Default to recipient of current transfer
+
+        # Check which addresses are being tracked by users
+        from_is_tracked = len(await db.get_users_tracking_evm_address(from_address)) > 0
+        to_is_tracked = len(await db.get_users_tracking_evm_address(to_address)) > 0
+
+        # Prefer the tracked address as the user's wallet
+        if to_is_tracked and not from_is_tracked:
+            user_wallet = to_address
+            logger.debug(f"User wallet identified from DB: {to_address[:10]}... (to_address is tracked)")
+        elif from_is_tracked and not to_is_tracked:
+            user_wallet = from_address
+            logger.debug(f"User wallet identified from DB: {from_address[:10]}... (from_address is tracked)")
+        elif from_is_tracked and to_is_tracked:
+            # Both are tracked - use heuristic: check which one appears in both send/receive positions
+            from_is_recipient = any(t['to'] == from_address for t in transfers)
+            to_is_sender = any(t['from'] == to_address for t in transfers)
+
+            if to_is_sender:
+                user_wallet = to_address
+                logger.debug(f"User wallet determined by swap pattern: {to_address[:10]}... (sends and receives)")
+            elif from_is_recipient:
+                user_wallet = from_address
+                logger.debug(f"User wallet determined by swap pattern: {from_address[:10]}... (sends and receives)")
+            else:
+                # Default to to_address
+                user_wallet = to_address
+                logger.debug(f"User wallet defaulted to to_address: {to_address[:10]}...")
+        else:
+            # Neither is tracked - shouldn't happen, but default to to_address
+            logger.debug(f"User wallet defaulted (no tracked address): {to_address[:10]}...")
+
+        logger.debug(f"Final user wallet: {user_wallet[:10]}...")
 
         # Find tokens sent BY the user
         tokens_sent_by_user = []
         for t in transfers:
-            if t['from'] == from_address or t['from'] == to_address:
+            if t['from'] == user_wallet:
                 tokens_sent_by_user.append(t)
+                logger.debug(f"  User sent: {t['amount']} of token {t['token'][:10]}...")
 
         # Find tokens received BY the user
         tokens_received_by_user = []
         for t in transfers:
-            if t['to'] == from_address or t['to'] == to_address:
+            if t['to'] == user_wallet:
                 tokens_received_by_user.append(t)
+                logger.debug(f"  User received: {t['amount']} of token {t['token'][:10]}...")
 
         logger.debug(f"User sent {len(tokens_sent_by_user)} tokens, received {len(tokens_received_by_user)} tokens")
 
@@ -552,58 +590,75 @@ async def process_token_transfer(activity: dict, eth_transfers: list = None):
             if current_is_send:
                 # Current token is being SOLD
                 # Look for what the user RECEIVED
+                # If multiple tokens were received, find the one with the largest amount (primary output token)
+                largest_received = None
+                largest_amount = 0
+
                 for received in tokens_received_by_user:
                     if received['token'] != token_address:  # Different token
-                        # Found the swap TO token
-                        swap_to_token_addr = received['token']
-                        swap_to_amount_raw = received['amount']
+                        if received['amount'] > largest_amount:
+                            largest_amount = received['amount']
+                            largest_received = received
 
-                        logger.debug(f"Detected SELL swap: {token_symbol} -> other token {swap_to_token_addr[:10]}...")
+                if largest_received:
+                    # Found the swap TO token
+                    swap_to_token_addr = largest_received['token']
+                    swap_to_amount_raw = largest_received['amount']
 
-                        # Fetch metadata
-                        swap_to_token_symbol = await fetch_token_symbol(swap_to_token_addr)
+                    logger.debug(f"Detected SELL swap: {token_symbol} -> other token {swap_to_token_addr[:10]}...")
 
-                        # Get decimals
-                        if swap_to_token_addr in _token_cache:
-                            to_decimals = _token_cache[swap_to_token_addr].get('decimals', 18)
-                        else:
-                            to_decimals = 18
+                    # Fetch metadata
+                    swap_to_token_symbol = await fetch_token_symbol(swap_to_token_addr)
 
-                        swap_to_amount_formatted = swap_to_amount_raw / (10 ** to_decimals)
-                        swap_to_usd = await fetch_token_price_usd(swap_to_token_symbol, swap_to_amount_formatted)
+                    # Get decimals
+                    if swap_to_token_addr in _token_cache:
+                        to_decimals = _token_cache[swap_to_token_addr].get('decimals', 18)
+                    else:
+                        to_decimals = 18
 
-                        # For SELL, also set swap_from to current token
-                        swap_from_token_symbol = token_symbol
-                        swap_from_amount_formatted = amount_formatted
-                        swap_from_usd = usd_value
+                    swap_to_amount_formatted = swap_to_amount_raw / (10 ** to_decimals)
+                    swap_to_usd = await fetch_token_price_usd(swap_to_token_symbol, swap_to_amount_formatted)
 
-                        logger.info(f"✅ Detected {token_symbol} -> {swap_to_token_symbol} SELL swap")
-                        break
+                    # For SELL, also set swap_from to current token
+                    swap_from_token_symbol = token_symbol
+                    swap_from_amount_formatted = amount_formatted
+                    swap_from_usd = usd_value
+
+                    logger.info(f"✅ Detected {token_symbol} -> {swap_to_token_symbol} SELL swap")
             else:
                 # Current token is being BOUGHT
                 # Look for what the user SENT
+                # If multiple tokens were sent, find the one with the largest amount (primary input token)
+                largest_sent = None
+                largest_amount = 0
+
                 for sent in tokens_sent_by_user:
                     if sent['token'] != token_address:  # Different token
-                        # Found the swap FROM token
-                        swap_from_token_addr = sent['token']
-                        swap_from_amount_raw = sent['amount']
+                        if sent['amount'] > largest_amount:
+                            largest_amount = sent['amount']
+                            largest_sent = sent
 
-                        logger.debug(f"Detected BUY swap: other token {swap_from_token_addr[:10]}... -> {token_symbol}")
+                if largest_sent:
+                    # Found the swap FROM token
+                    swap_from_token_addr = largest_sent['token']
+                    swap_from_amount_raw = largest_sent['amount']
 
-                        # Fetch metadata
-                        swap_from_token_symbol = await fetch_token_symbol(swap_from_token_addr)
+                    logger.debug(f"Detected BUY swap: other token {swap_from_token_addr[:10]}... -> {token_symbol}")
 
-                        # Get decimals
-                        if swap_from_token_addr in _token_cache:
-                            from_decimals = _token_cache[swap_from_token_addr].get('decimals', 18)
-                        else:
-                            from_decimals = 18
+                    # Fetch metadata
+                    swap_from_token_symbol = await fetch_token_symbol(swap_from_token_addr)
 
-                        swap_from_amount_formatted = swap_from_amount_raw / (10 ** from_decimals)
-                        swap_from_usd = await fetch_token_price_usd(swap_from_token_symbol, swap_from_amount_formatted)
+                    # Get decimals
+                    if swap_from_token_addr in _token_cache:
+                        from_decimals = _token_cache[swap_from_token_addr].get('decimals', 18)
+                    else:
+                        from_decimals = 18
 
-                        logger.info(f"✅ Detected {swap_from_token_symbol} -> {token_symbol} BUY swap")
-                        break
+                    swap_from_amount_formatted = swap_from_amount_raw / (10 ** from_decimals)
+                    swap_from_usd = await fetch_token_price_usd(swap_from_token_symbol, swap_from_amount_formatted)
+
+                    logger.info(f"✅ Detected {swap_from_token_symbol} -> {token_symbol} BUY swap")
+
 
         # If no swap found yet, check for ETH swaps from the webhook's activity list
         if not swap_from_token_symbol and not swap_to_token_symbol and eth_transfers:
@@ -644,6 +699,20 @@ async def process_token_transfer(activity: dict, eth_transfers: list = None):
                     swap_to_usd = await fetch_token_price_usd("WETH", eth_value)
 
                     break
+
+    # IMPORTANT: For swaps, only notify for the token being RECEIVED (bought), not the token being SENT (sold)
+    # This prevents duplicate notifications - we only want one notification per swap showing what they bought
+    if swap_from_token_symbol and swap_to_token_symbol:
+        # This is a SELL swap (user sent current token, received swap_to token)
+        # Skip notification for this transfer - the other transfer will handle it
+        current_is_send = (from_address == user_wallet)
+        if current_is_send:
+            logger.info(f"⏭️  Skipping SELL notification for {token_symbol} (will notify on {swap_to_token_symbol} receive)")
+            return
+    elif swap_from_token_symbol and not swap_to_token_symbol:
+        # This is a BUY swap (user sent swap_from token, received current token)
+        # We want to notify for this one - user is receiving the current token
+        pass
 
     # Find users tracking this token or these addresses
     tracking_users = []

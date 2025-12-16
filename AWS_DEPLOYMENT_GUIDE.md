@@ -196,7 +196,32 @@ If you see "Bot started successfully" - it's working! Press `Ctrl+C` to stop.
 
 ## Part 6: Keep Bot Running 24/7
 
-### 6.1 Install PM2 (Process Manager)
+You have **three options** for running both services together:
+
+### Option A: Using Shell Scripts (Recommended for Simple Deployment)
+
+```bash
+# Install screen
+sudo apt install screen -y
+
+# Start both services
+./start_all.sh
+
+# View bot logs
+screen -r hypertracker-bot
+
+# View webhook logs
+screen -r hypertracker-webhook
+
+# Detach from screen (keep running): Ctrl+A then D
+
+# Stop all services
+./stop_all.sh
+```
+
+### Option B: Using PM2 (Recommended for Production)
+
+#### 6B.1 Install PM2 (Process Manager)
 
 ```bash
 # Install Node.js (required for PM2)
@@ -207,7 +232,7 @@ sudo apt install -y nodejs
 sudo npm install -g pm2
 ```
 
-### 6.2 Create PM2 Ecosystem File
+#### 6B.2 Create PM2 Ecosystem File
 
 ```bash
 # Still in the hypertracker-bot directory
@@ -218,47 +243,70 @@ nano ecosystem.config.js
 
 ```javascript
 module.exports = {
-  apps: [{
-    name: 'hypertracker-bot',
-    script: 'venv/bin/python',
-    args: 'run.py',
-    cwd: '/home/ubuntu/hypertracker-bot',
-    instances: 1,
-    autorestart: true,
-    watch: false,
-    max_memory_restart: '500M',
-    env: {
-      NODE_ENV: 'production'
+  apps: [
+    {
+      name: 'hypertracker-bot',
+      script: 'venv/bin/python',
+      args: 'run.py',
+      cwd: '/home/ubuntu/hypertracker-bot',
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '500M',
+      env: {
+        NODE_ENV: 'production'
+      },
+      error_file: './logs/bot-err.log',
+      out_file: './logs/bot-out.log',
+      time: true
     },
-    error_file: './logs/err.log',
-    out_file: './logs/out.log',
-    log_file: './logs/combined.log',
-    time: true
-  }]
+    {
+      name: 'hypertracker-webhook',
+      script: 'venv/bin/python',
+      args: 'alchemy_webhook_server.py',
+      cwd: '/home/ubuntu/hypertracker-bot',
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '300M',
+      env: {
+        NODE_ENV: 'production'
+      },
+      error_file: './logs/webhook-err.log',
+      out_file: './logs/webhook-out.log',
+      time: true
+    }
+  ]
 };
 ```
 
 **Save and exit**: `Ctrl+X`, `Y`, `Enter`
 
-### 6.3 Start Bot with PM2
+#### 6B.3 Start Both Services with PM2
 
 ```bash
 # Create logs directory
 mkdir -p logs
 
-# Start the bot
+# Start both services
 pm2 start ecosystem.config.js
 
 # Check status
 pm2 status
 
-# View logs (real-time)
+# View bot logs (real-time)
 pm2 logs hypertracker-bot
+
+# View webhook logs (real-time)
+pm2 logs hypertracker-webhook
+
+# View all logs
+pm2 logs
 
 # Stop logs view: Ctrl+C
 ```
 
-### 6.4 Set PM2 to Start on Boot
+#### 6B.4 Set PM2 to Start on Boot
 
 ```bash
 # Generate startup script
@@ -270,6 +318,79 @@ pm2 startup systemd
 
 # Save current PM2 process list
 pm2 save
+```
+
+### Option C: Using Systemd (Most Robust for Production)
+
+Create systemd services for each process:
+
+#### 6C.1 Create Bot Service
+
+```bash
+sudo nano /etc/systemd/system/hypertracker-bot.service
+```
+
+Add:
+```ini
+[Unit]
+Description=HyperTracker Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/hypertracker-bot
+Environment="PATH=/home/ubuntu/hypertracker-bot/venv/bin"
+ExecStart=/home/ubuntu/hypertracker-bot/venv/bin/python /home/ubuntu/hypertracker-bot/run.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### 6C.2 Create Webhook Service
+
+```bash
+sudo nano /etc/systemd/system/hypertracker-webhook.service
+```
+
+Add:
+```ini
+[Unit]
+Description=HyperTracker Alchemy Webhook Server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/hypertracker-bot
+Environment="PATH=/home/ubuntu/hypertracker-bot/venv/bin"
+ExecStart=/home/ubuntu/hypertracker-bot/venv/bin/python /home/ubuntu/hypertracker-bot/alchemy_webhook_server.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### 6C.3 Enable and Start Services
+
+```bash
+# Reload systemd
+sudo systemctl daemon-reload
+
+# Enable (auto-start on boot)
+sudo systemctl enable hypertracker-bot
+sudo systemctl enable hypertracker-webhook
+
+# Start services
+sudo systemctl start hypertracker-bot
+sudo systemctl start hypertracker-webhook
+
+# Check status
+sudo systemctl status hypertracker-bot
+sudo systemctl status hypertracker-webhook
 ```
 
 ## Part 7: Managing Your Bot
@@ -339,17 +460,129 @@ SELECT * FROM users;
 .quit
 ```
 
-## Part 8: Security Best Practices
+## Part 8: Alchemy Webhook Setup (EVM Transaction Tracking)
 
-### 8.1 Update Security Group
+### 8.1 Update AWS Security Group
+
+Before configuring Alchemy webhooks, you need to allow incoming HTTP traffic on port 8080:
+
+1. **Go to EC2 Console** → Security Groups
+2. **Select your instance's security group**
+3. **Edit inbound rules** → Add rule:
+   - Type: Custom TCP
+   - Port: 8080
+   - Source: 0.0.0.0/0 (anywhere)
+   - Description: Alchemy webhook
+
+### 8.2 Get Your Webhook URL
+
+Your webhook URL is:
+```
+http://YOUR_EC2_PUBLIC_IP:8080/alchemy-webhook
+```
+
+**Example:**
+```
+http://54.123.45.67:8080/alchemy-webhook
+```
+
+Find your EC2 public IP in the EC2 console.
+
+### 8.3 Configure Alchemy Webhook
+
+1. **Go to** [Alchemy Dashboard](https://dashboard.alchemy.com/)
+2. **Select or create your app** (choose the network: Ethereum, Base, Arbitrum, etc.)
+3. **Navigate to** "Notify" → "Webhooks"
+4. **Click "Create Webhook"**
+
+**Webhook Configuration:**
+- **Webhook Type:** Address Activity
+- **Webhook URL:** `http://YOUR_EC2_IP:8080/alchemy-webhook`
+- **Network:** Choose your network (Ethereum Mainnet, Base, etc.)
+- **Addresses to Track:**
+  - Add the EVM addresses you want to monitor
+  - You can add addresses later via the bot's "EVM txn tracking" menu
+
+**Events to Subscribe:**
+- ✅ External transfers
+- ✅ Internal transfers
+- ✅ Token transfers (ERC-20)
+- ✅ NFT transfers (optional)
+
+5. **Enable Signature Verification** (recommended for security)
+6. **Copy the signing key** and add to your `.env`:
+
+```bash
+# On your EC2 instance
+cd ~/hypertracker-bot
+nano .env
+```
+
+Add:
+```env
+ALCHEMY_API_KEY=your_alchemy_api_key
+ALCHEMY_WEBHOOK_SIGNING_KEY=your_signing_key_from_alchemy
+```
+
+7. **Restart the webhook server:**
+
+```bash
+# If using PM2:
+pm2 restart hypertracker-webhook
+
+# If using systemd:
+sudo systemctl restart hypertracker-webhook
+
+# If using screen:
+./stop_all.sh && ./start_all.sh
+```
+
+### 8.4 Test the Webhook
+
+1. **Test from Alchemy Dashboard:**
+   - Use Alchemy's "Test Webhook" feature
+   - Send a test event
+
+2. **Check webhook server logs:**
+```bash
+# PM2:
+pm2 logs hypertracker-webhook
+
+# Systemd:
+sudo journalctl -u hypertracker-webhook -f
+
+# Screen:
+screen -r hypertracker-webhook
+```
+
+3. **Test endpoint health:**
+```bash
+curl http://YOUR_EC2_IP:8080/health
+```
+
+Should return: `{"status":"healthy"}`
+
+### 8.5 Add Addresses to Track via Telegram
+
+1. Open your bot on Telegram
+2. Click "🔷 EVM txn tracking"
+3. Click "➕ Add EVM Address"
+4. Send the address you want to track
+5. Provide a label
+
+The bot will now send you notifications when transactions occur on that address!
+
+## Part 9: Security Best Practices
+
+### 9.1 Restrict SSH Access
 
 1. Go to EC2 Console > Security Groups
 2. Select your instance's security group
 3. Edit inbound rules:
    - **SSH (22)**: Change to "My IP" instead of "Anywhere"
-   - Remove any unnecessary ports
+   - Keep port 8080 open for Alchemy webhooks
 
-### 8.2 Set Up Automatic Updates
+### 9.2 Set Up Automatic Updates
 
 ```bash
 # Install unattended upgrades
@@ -359,7 +592,7 @@ sudo apt install unattended-upgrades -y
 sudo dpkg-reconfigure -plow unattended-upgrades
 ```
 
-### 8.3 Create Swap File (Optional - helps with low memory)
+### 9.3 Create Swap File (Optional - helps with low memory)
 
 ```bash
 # Create 1GB swap file

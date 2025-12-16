@@ -25,6 +25,9 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🚨 Liquidation Monitor", callback_data="liquidations")
     )
     builder.row(
+        InlineKeyboardButton(text="🔷 EVM txn tracking", callback_data="evm_tracking")
+    )
+    builder.row(
         InlineKeyboardButton(text="📊 Stats", callback_data="stats")
     )
 
@@ -385,4 +388,24 @@ def get_back_to_menu_keyboard() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="🔙 Back to Menu", callback_data="main_menu")
     )
+    return builder.as_markup()
+
+
+def get_evm_tracking_keyboard() -> InlineKeyboardMarkup:
+    """Get EVM tracking submenu keyboard."""
+    builder = InlineKeyboardBuilder()
+
+    builder.row(
+        InlineKeyboardButton(text="➕ Add EVM Address", callback_data="evm_add_address")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📋 List Tracked Addresses", callback_data="evm_list")
+    )
+    builder.row(
+        InlineKeyboardButton(text="❌ Stop Tracking", callback_data="evm_stop_tracking")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Back to Menu", callback_data="main_menu")
+    )
+
     return builder.as_markup()
