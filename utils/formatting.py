@@ -315,14 +315,17 @@ def format_hourly_wallet_summary(
         for asset in summary["assets"][:6]:
             net_asset = asset["net_flow_usd"]
             if net_asset > 0:
+                emoji = "🟢"
                 direction = "net buy"
             elif net_asset < 0:
+                emoji = "🔴"
                 direction = "net sell"
             else:
+                emoji = "⚪"
                 direction = "flat"
 
             detail = (
-                f"{asset['coin']}: ${abs(net_asset):,.2f} {direction} "
+                f"{emoji} {asset['coin']}: ${abs(net_asset):,.2f} {direction} "
                 f"({asset['fills_count']} fills)"
             )
 
