@@ -3,9 +3,10 @@ HyperTracker Bot - Main Entry Point
 Real-time Hyperliquid wallet tracking and cross-venue liquidation monitoring.
 """
 import asyncio
+from contextlib import suppress
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict
 
 from aiogram import Bot, Dispatcher
@@ -53,6 +54,7 @@ class HyperTrackerBot:
 
         # Start time for uptime tracking
         self.start_time = time.time()
+        self.hourly_summary_task: asyncio.Task | None = None
 
         # Liquidation statistics tracking (last hour)
         self.liq_stats = {
@@ -194,6 +196,14 @@ class HyperTrackerBot:
         for wallet in wallets:
             logger.info(f"Checking filters for user {wallet.user_id} (wallet_id: {wallet.id}, alias: {wallet.alias})")
 
+            is_close = False
+            if fill.dir:
+                is_close = "Close" in fill.dir
+            elif fill.closed_pnl is not None and fill.closed_pnl != "0.0":
+                is_close = True
+
+            await self.db.record_wallet_fill(wallet, fill, is_close)
+
             # Get user's global filters
             user_settings = await self.db.get_user_settings(wallet.user_id)
             global_filters = user_settings.global_wallet_filters
@@ -207,6 +217,94 @@ class HyperTrackerBot:
                 await self.notifier.notify_fill(wallet.user_id, fill, wallet)
             else:
                 logger.info(f"Filter check failed for wallet {wallet.id}")
+
+    async def hourly_wallet_summary_loop(self):
+        """Send one-hour wallet summaries for completed hourly windows."""
+        await asyncio.sleep(15)
+
+        while True:
+            try:
+                await self.process_hourly_wallet_summaries()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Error processing hourly wallet summaries: {e}", exc_info=True)
+
+            await asyncio.sleep(300)
+
+    async def process_hourly_wallet_summaries(self):
+        """Process any completed hourly windows that have not been summarized yet."""
+        active_wallets = await self.db.get_all_active_wallets()
+        if not active_wallets:
+            return
+
+        now = datetime.now(timezone.utc)
+        current_hour_start = now.replace(minute=0, second=0, microsecond=0)
+        current_hour_start_ms = int(current_hour_start.timestamp() * 1000)
+
+        for wallet in active_wallets:
+            if wallet.id is None:
+                continue
+
+            last_processed_ms = await self.db.get_last_summary_hour_start_ms(wallet.id)
+            if last_processed_ms is None:
+                pending_hour_start = current_hour_start - timedelta(hours=1)
+            else:
+                pending_hour_start = datetime.fromtimestamp(
+                    (last_processed_ms / 1000) + 3600,
+                    tz=timezone.utc,
+                )
+
+            while pending_hour_start.timestamp() * 1000 < current_hour_start_ms:
+                await self._process_single_wallet_hour(wallet, pending_hour_start)
+                pending_hour_start += timedelta(hours=1)
+
+        # Keep a week of raw fill history, which is enough for rollups and debugging.
+        cutoff_ms = int((now - timedelta(days=7)).timestamp() * 1000)
+        await self.db.delete_fill_events_before(cutoff_ms)
+
+    async def _process_single_wallet_hour(self, wallet: Wallet, hour_start: datetime):
+        """Build and optionally send a summary for one completed hour."""
+        if wallet.id is None:
+            return
+
+        hour_end = hour_start + timedelta(hours=1)
+        start_ms = int(hour_start.timestamp() * 1000)
+        end_ms = int(hour_end.timestamp() * 1000)
+        summary = await self.db.get_wallet_fill_summary(wallet.id, start_ms, end_ms)
+
+        should_send = False
+        if summary["total_fills"] > 0:
+            user_settings = await self.db.get_user_settings(wallet.user_id)
+            global_filters = user_settings.global_wallet_filters
+            threshold = wallet.filters.min_notional_usd
+            if global_filters:
+                threshold = max(threshold, global_filters.min_notional_usd)
+
+            if threshold > 0:
+                summary_peak = max(
+                    summary["total_buy_usd"],
+                    summary["total_sell_usd"],
+                    abs(summary["net_flow_usd"]),
+                )
+                should_send = summary_peak >= threshold
+
+        if should_send:
+            logger.info(
+                "Sending hourly wallet summary for wallet %s (user %s) covering %s",
+                wallet.id,
+                wallet.user_id,
+                hour_start.isoformat(),
+            )
+            await self.notifier.send_hourly_wallet_summary(
+                wallet.user_id,
+                wallet,
+                summary,
+                hour_start,
+                hour_end,
+            )
+
+        await self.db.mark_summary_hour_processed(wallet.id, start_ms)
     
     async def handle_deposit(self, deposit: HyperliquidDeposit):
         """Handle deposit event from Hyperliquid."""
@@ -369,6 +467,7 @@ class HyperTrackerBot:
 
         # Start exchange liquidation monitoring in background
         asyncio.create_task(self.exchange_liq_ws.start())
+        self.hourly_summary_task = asyncio.create_task(self.hourly_wallet_summary_loop())
 
         # Start polling
         try:
@@ -381,6 +480,10 @@ class HyperTrackerBot:
         logger.info("Shutting down HyperTracker Bot...")
 
         # Stop all WebSocket connections
+        if self.hourly_summary_task:
+            self.hourly_summary_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.hourly_summary_task
         await self.hyperliquid_ws.stop_all()
         await self.exchange_liq_ws.stop()
 

@@ -281,6 +281,66 @@ def format_withdrawal_notification(wallet: Wallet, amount: str, timestamp: int, 
     return "\n".join(lines)
 
 
+def format_hourly_wallet_summary(
+    wallet: Wallet,
+    summary: dict,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> str:
+    """Format a 1-hour rollup of wallet activity."""
+    wallet_name = wallet.alias if wallet.alias else format_address(wallet.address)
+
+    lines = [
+        "1H WALLET SUMMARY",
+        f"Wallet: {wallet_name} (`{wallet.address}`)",
+        f"Window: {start_dt.strftime('%d/%m %H:%M')} - {end_dt.strftime('%H:%M')} UTC",
+        "",
+        f"Fills: {summary['total_fills']}",
+        f"Total buy: ${summary['total_buy_usd']:,.2f}",
+        f"Total sell: ${summary['total_sell_usd']:,.2f}",
+    ]
+
+    net_flow = summary["net_flow_usd"]
+    if net_flow > 0:
+        net_label = "Net buy"
+    elif net_flow < 0:
+        net_label = "Net sell"
+    else:
+        net_label = "Net flow"
+    lines.append(f"{net_label}: ${abs(net_flow):,.2f}" if net_flow != 0 else "Net flow: $0.00")
+
+    if summary["assets"]:
+        lines.append("")
+        lines.append("By asset:")
+        for asset in summary["assets"][:6]:
+            net_asset = asset["net_flow_usd"]
+            if net_asset > 0:
+                direction = "net buy"
+            elif net_asset < 0:
+                direction = "net sell"
+            else:
+                direction = "flat"
+
+            detail = (
+                f"{asset['coin']}: ${abs(net_asset):,.2f} {direction} "
+                f"({asset['fills_count']} fills)"
+            )
+
+            if asset["gross_buy_usd"] > 0 and asset["gross_sell_usd"] > 0:
+                detail += (
+                    f" | buy ${asset['gross_buy_usd']:,.0f}"
+                    f" / sell ${asset['gross_sell_usd']:,.0f}"
+                )
+
+            lines.append(detail)
+
+        remaining = len(summary["assets"]) - 6
+        if remaining > 0:
+            lines.append(f"...and {remaining} more asset(s)")
+
+    return "\n".join(lines)
+
+
 def format_twap_notification(twap: HyperliquidTwapOrder, wallet: Wallet) -> str:
     """
     Format a TWAP order event into a beautiful Telegram message.

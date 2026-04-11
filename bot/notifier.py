@@ -17,7 +17,7 @@ from core.models import (
 from utils.formatting import (
     format_fill_notification, format_deposit_notification,
     format_withdrawal_notification, format_liquidation_notification,
-    format_twap_notification
+    format_twap_notification, format_hourly_wallet_summary
 )
 
 logger = logging.getLogger(__name__)
@@ -220,3 +220,22 @@ class Notifier:
             await self._send_message(chat_id, message, thread_id)
         except Exception as e:
             logger.error(f"Error sending EVM notification to {user_id}: {e}")
+
+    async def send_hourly_wallet_summary(
+        self,
+        user_id: int,
+        wallet: Wallet,
+        summary: dict,
+        start_dt,
+        end_dt,
+    ):
+        """Send a 1-hour wallet rollup to the user's trades destination."""
+        if user_id in self._blocked_users:
+            return
+
+        try:
+            message = format_hourly_wallet_summary(wallet, summary, start_dt, end_dt)
+            chat_id, thread_id = self._get_destination(user_id, 'trades')
+            await self._send_message(chat_id, message, thread_id)
+        except Exception as e:
+            logger.error(f"Error sending hourly wallet summary to {user_id}: {e}")

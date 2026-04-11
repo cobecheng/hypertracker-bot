@@ -2,9 +2,10 @@
 Database layer using aiosqlite for HyperTracker Bot.
 Handles all database operations with async/await support.
 """
+import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import aiosqlite
@@ -97,6 +98,50 @@ class Database:
 
         await self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_wallets_active ON wallets(active)
+        """)
+
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_fill_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wallet_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                wallet_address TEXT NOT NULL,
+                coin TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price REAL NOT NULL,
+                size REAL NOT NULL,
+                notional_usd REAL NOT NULL,
+                event_time_ms INTEGER NOT NULL,
+                event_time_iso TEXT NOT NULL,
+                hash TEXT,
+                fee REAL,
+                liquidation INTEGER NOT NULL DEFAULT 0,
+                is_close INTEGER NOT NULL DEFAULT 0,
+                dir TEXT,
+                event_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (wallet_id) REFERENCES wallets(id),
+                FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+            )
+        """)
+
+        await self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_fill_events_wallet_time
+            ON wallet_fill_events(wallet_id, event_time_ms)
+        """)
+
+        await self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_fill_events_user_time
+            ON wallet_fill_events(user_id, event_time_ms)
+        """)
+
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_hourly_summary_state (
+                wallet_id INTEGER PRIMARY KEY,
+                last_completed_hour_start_ms INTEGER,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (wallet_id) REFERENCES wallets(id)
+            )
         """)
 
         # EVM tracking table
@@ -348,6 +393,181 @@ class Database:
         except Exception as e:
             logger.error(f"Error getting all users: {e}")
             return []
+
+    async def record_wallet_fill(self, wallet: Wallet, fill, is_close: bool) -> bool:
+        """Persist a fill event for later summary rollups."""
+        if wallet.id is None:
+            logger.warning("Skipping fill persistence for wallet without database ID")
+            return False
+
+        try:
+            price = float(fill.px)
+            size = float(fill.sz)
+            fee = float(fill.fee) if fill.fee is not None else None
+            notional = price * size
+            event_time_ms = int(fill.time)
+            event_time_iso = datetime.fromtimestamp(
+                event_time_ms / 1000,
+                tz=timezone.utc,
+            ).isoformat()
+            raw_key = "|".join([
+                str(wallet.id),
+                wallet.address.lower(),
+                fill.coin,
+                fill.side,
+                f"{price:.10f}",
+                f"{size:.10f}",
+                str(event_time_ms),
+                fill.hash or "",
+                fill.dir or "",
+            ])
+            event_id = hashlib.sha1(raw_key.encode("utf-8")).hexdigest()
+
+            await self.conn.execute("""
+                INSERT OR IGNORE INTO wallet_fill_events (
+                    wallet_id, user_id, wallet_address, coin, side, price, size,
+                    notional_usd, event_time_ms, event_time_iso, hash, fee,
+                    liquidation, is_close, dir, event_id, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                wallet.id,
+                wallet.user_id,
+                wallet.address.lower(),
+                fill.coin,
+                fill.side,
+                price,
+                size,
+                notional,
+                event_time_ms,
+                event_time_iso,
+                fill.hash,
+                fee,
+                int(fill.liquidation),
+                int(is_close),
+                fill.dir,
+                event_id,
+                datetime.utcnow().isoformat(),
+            ))
+            await self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error recording wallet fill for wallet {wallet.id}: {e}")
+            return False
+
+    async def get_last_summary_hour_start_ms(self, wallet_id: int) -> Optional[int]:
+        """Get the last completed hour start already processed for a wallet."""
+        cursor = await self.conn.execute("""
+            SELECT last_completed_hour_start_ms
+            FROM wallet_hourly_summary_state
+            WHERE wallet_id = ?
+        """, (wallet_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return row["last_completed_hour_start_ms"]
+
+    async def mark_summary_hour_processed(self, wallet_id: int, hour_start_ms: int) -> bool:
+        """Mark a completed hour as processed for summary generation."""
+        try:
+            await self.conn.execute("""
+                INSERT INTO wallet_hourly_summary_state (
+                    wallet_id, last_completed_hour_start_ms, updated_at
+                )
+                VALUES (?, ?, ?)
+                ON CONFLICT(wallet_id) DO UPDATE SET
+                    last_completed_hour_start_ms = excluded.last_completed_hour_start_ms,
+                    updated_at = excluded.updated_at
+            """, (
+                wallet_id,
+                hour_start_ms,
+                datetime.utcnow().isoformat(),
+            ))
+            await self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error marking summary hour for wallet {wallet_id}: {e}")
+            return False
+
+    async def get_wallet_fill_summary(
+        self,
+        wallet_id: int,
+        start_time_ms: int,
+        end_time_ms: int,
+    ) -> dict:
+        """Aggregate fills for a wallet over a time window."""
+        summary = {
+            "total_fills": 0,
+            "total_buy_usd": 0.0,
+            "total_sell_usd": 0.0,
+            "net_flow_usd": 0.0,
+            "assets": [],
+        }
+
+        totals_cursor = await self.conn.execute("""
+            SELECT
+                COUNT(*) AS total_fills,
+                COALESCE(SUM(CASE WHEN side = 'B' THEN notional_usd ELSE 0 END), 0) AS total_buy_usd,
+                COALESCE(SUM(CASE WHEN side = 'A' THEN notional_usd ELSE 0 END), 0) AS total_sell_usd
+            FROM wallet_fill_events
+            WHERE wallet_id = ?
+              AND event_time_ms >= ?
+              AND event_time_ms < ?
+        """, (wallet_id, start_time_ms, end_time_ms))
+        totals_row = await totals_cursor.fetchone()
+
+        if totals_row:
+            summary["total_fills"] = totals_row["total_fills"] or 0
+            summary["total_buy_usd"] = float(totals_row["total_buy_usd"] or 0)
+            summary["total_sell_usd"] = float(totals_row["total_sell_usd"] or 0)
+            summary["net_flow_usd"] = summary["total_buy_usd"] - summary["total_sell_usd"]
+
+        assets_cursor = await self.conn.execute("""
+            SELECT
+                coin,
+                COUNT(*) AS fills_count,
+                COALESCE(SUM(CASE WHEN side = 'B' THEN notional_usd ELSE 0 END), 0) AS gross_buy_usd,
+                COALESCE(SUM(CASE WHEN side = 'A' THEN notional_usd ELSE 0 END), 0) AS gross_sell_usd,
+                COALESCE(SUM(CASE WHEN side = 'B' THEN size ELSE -size END), 0) AS net_size
+            FROM wallet_fill_events
+            WHERE wallet_id = ?
+              AND event_time_ms >= ?
+              AND event_time_ms < ?
+            GROUP BY coin
+            ORDER BY ABS(
+                COALESCE(SUM(CASE WHEN side = 'B' THEN notional_usd ELSE 0 END), 0) -
+                COALESCE(SUM(CASE WHEN side = 'A' THEN notional_usd ELSE 0 END), 0)
+            ) DESC,
+            fills_count DESC
+        """, (wallet_id, start_time_ms, end_time_ms))
+        asset_rows = await assets_cursor.fetchall()
+
+        for row in asset_rows:
+            gross_buy_usd = float(row["gross_buy_usd"] or 0)
+            gross_sell_usd = float(row["gross_sell_usd"] or 0)
+            summary["assets"].append({
+                "coin": row["coin"],
+                "fills_count": row["fills_count"],
+                "gross_buy_usd": gross_buy_usd,
+                "gross_sell_usd": gross_sell_usd,
+                "net_flow_usd": gross_buy_usd - gross_sell_usd,
+                "net_size": float(row["net_size"] or 0),
+            })
+
+        return summary
+
+    async def delete_fill_events_before(self, cutoff_time_ms: int) -> bool:
+        """Delete old persisted fill events to keep the database compact."""
+        try:
+            await self.conn.execute("""
+                DELETE FROM wallet_fill_events
+                WHERE event_time_ms < ?
+            """, (cutoff_time_ms,))
+            await self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting old fill events: {e}")
+            return False
 
     # EVM tracking operations
     async def add_evm_address(self, tracked_address: TrackedAddress) -> Optional[int]:
