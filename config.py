@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Dashboard live snapshot polling
+    dashboard_live_poll_interval_seconds: int = 30
+
     # EVM Tracking (Alchemy)
     alchemy_api_key: Optional[str] = None
     alchemy_signing_key: Optional[str] = None  # Webhook signing key from Alchemy dashboard

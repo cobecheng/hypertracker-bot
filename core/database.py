@@ -144,6 +144,29 @@ class Database:
             )
         """)
 
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_live_snapshots (
+                wallet_id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                wallet_address TEXT NOT NULL,
+                account_value REAL NOT NULL DEFAULT 0,
+                total_notional_usd REAL NOT NULL DEFAULT 0,
+                total_margin_used REAL NOT NULL DEFAULT 0,
+                withdrawable REAL NOT NULL DEFAULT 0,
+                positions_count INTEGER NOT NULL DEFAULT 0,
+                long_positions_count INTEGER NOT NULL DEFAULT 0,
+                short_positions_count INTEGER NOT NULL DEFAULT 0,
+                net_exposure_bias TEXT NOT NULL DEFAULT 'flat',
+                positions_json TEXT NOT NULL,
+                raw_snapshot_json TEXT NOT NULL,
+                snapshot_time_ms INTEGER NOT NULL,
+                snapshot_time_iso TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (wallet_id) REFERENCES wallets(id),
+                FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+            )
+        """)
+
         # EVM tracking table
         await self.conn.execute("""
             CREATE TABLE IF NOT EXISTS evm_tracked_addresses (
@@ -568,6 +591,432 @@ class Database:
         except Exception as e:
             logger.error(f"Error deleting old fill events: {e}")
             return False
+
+    async def upsert_wallet_live_snapshot(
+        self,
+        wallet: Wallet,
+        snapshot_time_ms: int,
+        positions: list[dict],
+        raw_snapshot: dict,
+        account_value: float,
+        total_notional_usd: float,
+        total_margin_used: float,
+        withdrawable: float,
+    ) -> bool:
+        """Store the latest live account snapshot for a wallet."""
+        if wallet.id is None:
+            return False
+
+        long_count = sum(1 for p in positions if p.get("direction") == "long")
+        short_count = sum(1 for p in positions if p.get("direction") == "short")
+        if long_count > short_count:
+            bias = "long"
+        elif short_count > long_count:
+            bias = "short"
+        else:
+            bias = "flat"
+
+        snapshot_time_iso = datetime.fromtimestamp(
+            snapshot_time_ms / 1000,
+            tz=timezone.utc,
+        ).isoformat()
+
+        try:
+            await self.conn.execute("""
+                INSERT INTO wallet_live_snapshots (
+                    wallet_id, user_id, wallet_address, account_value,
+                    total_notional_usd, total_margin_used, withdrawable,
+                    positions_count, long_positions_count, short_positions_count,
+                    net_exposure_bias, positions_json, raw_snapshot_json,
+                    snapshot_time_ms, snapshot_time_iso, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(wallet_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    wallet_address = excluded.wallet_address,
+                    account_value = excluded.account_value,
+                    total_notional_usd = excluded.total_notional_usd,
+                    total_margin_used = excluded.total_margin_used,
+                    withdrawable = excluded.withdrawable,
+                    positions_count = excluded.positions_count,
+                    long_positions_count = excluded.long_positions_count,
+                    short_positions_count = excluded.short_positions_count,
+                    net_exposure_bias = excluded.net_exposure_bias,
+                    positions_json = excluded.positions_json,
+                    raw_snapshot_json = excluded.raw_snapshot_json,
+                    snapshot_time_ms = excluded.snapshot_time_ms,
+                    snapshot_time_iso = excluded.snapshot_time_iso,
+                    updated_at = excluded.updated_at
+            """, (
+                wallet.id,
+                wallet.user_id,
+                wallet.address.lower(),
+                account_value,
+                total_notional_usd,
+                total_margin_used,
+                withdrawable,
+                len(positions),
+                long_count,
+                short_count,
+                bias,
+                json.dumps(positions),
+                json.dumps(raw_snapshot),
+                snapshot_time_ms,
+                snapshot_time_iso,
+                datetime.utcnow().isoformat(),
+            ))
+            await self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error upserting live snapshot for wallet {wallet.id}: {e}")
+            return False
+
+    async def get_live_dashboard_overview(self) -> dict:
+        """Get aggregate live snapshot stats."""
+        cursor = await self.conn.execute("""
+            SELECT
+                COUNT(*) AS wallets_with_snapshot,
+                COALESCE(SUM(account_value), 0) AS total_account_value,
+                COALESCE(SUM(total_notional_usd), 0) AS total_notional_usd,
+                COALESCE(SUM(CASE WHEN net_exposure_bias = 'long' THEN 1 ELSE 0 END), 0) AS net_long_wallets,
+                COALESCE(SUM(CASE WHEN net_exposure_bias = 'short' THEN 1 ELSE 0 END), 0) AS net_short_wallets,
+                COALESCE(SUM(positions_count), 0) AS total_open_positions,
+                MAX(snapshot_time_ms) AS latest_snapshot_time_ms
+            FROM wallet_live_snapshots
+        """)
+        row = await cursor.fetchone()
+        return {
+            "wallets_with_snapshot": row["wallets_with_snapshot"] or 0,
+            "total_account_value": float(row["total_account_value"] or 0),
+            "total_notional_usd": float(row["total_notional_usd"] or 0),
+            "net_long_wallets": row["net_long_wallets"] or 0,
+            "net_short_wallets": row["net_short_wallets"] or 0,
+            "total_open_positions": row["total_open_positions"] or 0,
+            "latest_snapshot_time_ms": row["latest_snapshot_time_ms"],
+        }
+
+    async def get_live_asset_exposure(self, limit: int = 25) -> List[dict]:
+        """Get aggregate live exposure by asset from cached positions."""
+        # SQLite JSON virtual table support is inconsistent across environments.
+        # Parse cached JSON rows in Python for maximum portability.
+        row_cursor = await self.conn.execute("""
+            SELECT wallet_address, positions_json
+            FROM wallet_live_snapshots
+        """)
+        rows = await row_cursor.fetchall()
+
+        exposures: dict[str, dict] = {}
+        for row in rows:
+            positions = json.loads(row["positions_json"])
+            seen_assets = set()
+            for position in positions:
+                coin = position.get("coin")
+                if not coin:
+                    continue
+                data = exposures.setdefault(coin, {
+                    "coin": coin,
+                    "wallets_count": 0,
+                    "long_usd": 0.0,
+                    "short_usd": 0.0,
+                    "net_usd": 0.0,
+                })
+                if coin not in seen_assets:
+                    data["wallets_count"] += 1
+                    seen_assets.add(coin)
+
+                notional = float(position.get("position_notional_usd") or 0)
+                direction = position.get("direction")
+                if direction == "long":
+                    data["long_usd"] += notional
+                    data["net_usd"] += notional
+                elif direction == "short":
+                    data["short_usd"] += notional
+                    data["net_usd"] -= notional
+
+        return sorted(
+            exposures.values(),
+            key=lambda item: abs(item["net_usd"]),
+            reverse=True,
+        )[:limit]
+
+    async def get_wallet_live_snapshot(self, wallet_id: int) -> Optional[dict]:
+        """Get the latest cached live snapshot for a wallet."""
+        cursor = await self.conn.execute("""
+            SELECT *
+            FROM wallet_live_snapshots
+            WHERE wallet_id = ?
+        """, (wallet_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+
+        return {
+            "wallet_id": row["wallet_id"],
+            "user_id": row["user_id"],
+            "wallet_address": row["wallet_address"],
+            "account_value": float(row["account_value"] or 0),
+            "total_notional_usd": float(row["total_notional_usd"] or 0),
+            "total_margin_used": float(row["total_margin_used"] or 0),
+            "withdrawable": float(row["withdrawable"] or 0),
+            "positions_count": row["positions_count"] or 0,
+            "long_positions_count": row["long_positions_count"] or 0,
+            "short_positions_count": row["short_positions_count"] or 0,
+            "net_exposure_bias": row["net_exposure_bias"],
+            "positions": json.loads(row["positions_json"]),
+            "snapshot_time_ms": row["snapshot_time_ms"],
+        }
+
+    async def get_dashboard_overview(self, start_time_ms: int) -> dict:
+        """Get top-level dashboard stats for a time window."""
+        cursor = await self.conn.execute("""
+            SELECT
+                COUNT(DISTINCT w.id) AS tracked_wallets,
+                COUNT(DISTINCT CASE WHEN e.id IS NOT NULL THEN w.id END) AS active_wallets,
+                COUNT(DISTINCT e.coin) AS active_assets,
+                COUNT(e.id) AS total_fills,
+                COALESCE(SUM(CASE WHEN e.side = 'B' THEN e.notional_usd ELSE 0 END), 0) AS total_buy_usd,
+                COALESCE(SUM(CASE WHEN e.side = 'A' THEN e.notional_usd ELSE 0 END), 0) AS total_sell_usd
+            FROM wallets w
+            LEFT JOIN wallet_fill_events e
+                ON e.wallet_id = w.id
+               AND e.event_time_ms >= ?
+            WHERE w.active = 1
+        """, (start_time_ms,))
+        row = await cursor.fetchone()
+
+        total_buy_usd = float(row["total_buy_usd"] or 0)
+        total_sell_usd = float(row["total_sell_usd"] or 0)
+        return {
+            "tracked_wallets": row["tracked_wallets"] or 0,
+            "active_wallets": row["active_wallets"] or 0,
+            "active_assets": row["active_assets"] or 0,
+            "total_fills": row["total_fills"] or 0,
+            "total_buy_usd": total_buy_usd,
+            "total_sell_usd": total_sell_usd,
+            "net_flow_usd": total_buy_usd - total_sell_usd,
+        }
+
+    async def get_dashboard_asset_flows(self, start_time_ms: int, limit: int = 25) -> List[dict]:
+        """Get aggregate asset flows across tracked wallets."""
+        cursor = await self.conn.execute("""
+            SELECT
+                e.coin,
+                COUNT(*) AS fills_count,
+                COUNT(DISTINCT e.wallet_id) AS wallets_count,
+                COALESCE(SUM(CASE WHEN e.side = 'B' THEN e.notional_usd ELSE 0 END), 0) AS buy_usd,
+                COALESCE(SUM(CASE WHEN e.side = 'A' THEN e.notional_usd ELSE 0 END), 0) AS sell_usd
+            FROM wallet_fill_events e
+            INNER JOIN wallets w ON w.id = e.wallet_id
+            WHERE w.active = 1
+              AND e.event_time_ms >= ?
+            GROUP BY e.coin
+            ORDER BY ABS(
+                COALESCE(SUM(CASE WHEN e.side = 'B' THEN e.notional_usd ELSE 0 END), 0) -
+                COALESCE(SUM(CASE WHEN e.side = 'A' THEN e.notional_usd ELSE 0 END), 0)
+            ) DESC,
+            fills_count DESC
+            LIMIT ?
+        """, (start_time_ms, limit))
+        rows = await cursor.fetchall()
+
+        assets = []
+        for row in rows:
+            buy_usd = float(row["buy_usd"] or 0)
+            sell_usd = float(row["sell_usd"] or 0)
+            assets.append({
+                "coin": row["coin"],
+                "fills_count": row["fills_count"],
+                "wallets_count": row["wallets_count"],
+                "buy_usd": buy_usd,
+                "sell_usd": sell_usd,
+                "net_flow_usd": buy_usd - sell_usd,
+            })
+        return assets
+
+    async def get_dashboard_wallet_summaries(self, start_time_ms: int, limit: int = 100) -> List[dict]:
+        """Get per-wallet summaries for the dashboard."""
+        cursor = await self.conn.execute("""
+            SELECT
+                w.id,
+                w.user_id,
+                w.address,
+                w.alias,
+                COUNT(e.id) AS fills_count,
+                COUNT(DISTINCT e.coin) AS assets_count,
+                MAX(e.event_time_ms) AS last_event_time_ms,
+                COALESCE(SUM(CASE WHEN e.side = 'B' THEN e.notional_usd ELSE 0 END), 0) AS buy_usd,
+                COALESCE(SUM(CASE WHEN e.side = 'A' THEN e.notional_usd ELSE 0 END), 0) AS sell_usd
+            FROM wallets w
+            LEFT JOIN wallet_fill_events e
+                ON e.wallet_id = w.id
+               AND e.event_time_ms >= ?
+            WHERE w.active = 1
+            GROUP BY w.id, w.user_id, w.address, w.alias
+            ORDER BY ABS(
+                COALESCE(SUM(CASE WHEN e.side = 'B' THEN e.notional_usd ELSE 0 END), 0) -
+                COALESCE(SUM(CASE WHEN e.side = 'A' THEN e.notional_usd ELSE 0 END), 0)
+            ) DESC,
+            fills_count DESC,
+            w.created_at DESC
+            LIMIT ?
+        """, (start_time_ms, limit))
+        rows = await cursor.fetchall()
+
+        wallets = []
+        for row in rows:
+            buy_usd = float(row["buy_usd"] or 0)
+            sell_usd = float(row["sell_usd"] or 0)
+            wallets.append({
+                "id": row["id"],
+                "user_id": row["user_id"],
+                "address": row["address"],
+                "alias": row["alias"],
+                "fills_count": row["fills_count"] or 0,
+                "assets_count": row["assets_count"] or 0,
+                "last_event_time_ms": row["last_event_time_ms"],
+                "buy_usd": buy_usd,
+                "sell_usd": sell_usd,
+                "net_flow_usd": buy_usd - sell_usd,
+            })
+
+        for wallet in wallets:
+            live_snapshot = await self.get_wallet_live_snapshot(wallet["id"])
+            wallet["live"] = live_snapshot
+        return wallets
+
+    async def get_recent_fill_events(self, start_time_ms: int, limit: int = 50) -> List[dict]:
+        """Get recent fill events for the dashboard activity feed."""
+        cursor = await self.conn.execute("""
+            SELECT
+                e.wallet_id,
+                w.alias,
+                w.address,
+                e.coin,
+                e.side,
+                e.price,
+                e.size,
+                e.notional_usd,
+                e.event_time_ms,
+                e.dir
+            FROM wallet_fill_events e
+            INNER JOIN wallets w ON w.id = e.wallet_id
+            WHERE w.active = 1
+              AND e.event_time_ms >= ?
+            ORDER BY e.event_time_ms DESC, e.id DESC
+            LIMIT ?
+        """, (start_time_ms, limit))
+        rows = await cursor.fetchall()
+
+        events = []
+        for row in rows:
+            events.append({
+                "wallet_id": row["wallet_id"],
+                "alias": row["alias"],
+                "address": row["address"],
+                "coin": row["coin"],
+                "side": row["side"],
+                "price": float(row["price"]),
+                "size": float(row["size"]),
+                "notional_usd": float(row["notional_usd"]),
+                "event_time_ms": row["event_time_ms"],
+                "dir": row["dir"],
+            })
+        return events
+
+    async def get_wallet_dashboard_detail(self, wallet_id: int, start_time_ms: int) -> Optional[dict]:
+        """Get detailed dashboard data for a single wallet."""
+        cursor = await self.conn.execute("""
+            SELECT id, user_id, address, alias, active
+            FROM wallets
+            WHERE id = ?
+        """, (wallet_id,))
+        wallet_row = await cursor.fetchone()
+        if not wallet_row:
+            return None
+
+        summary_cursor = await self.conn.execute("""
+            SELECT
+                COUNT(*) AS fills_count,
+                COUNT(DISTINCT coin) AS assets_count,
+                MAX(event_time_ms) AS last_event_time_ms,
+                COALESCE(SUM(CASE WHEN side = 'B' THEN notional_usd ELSE 0 END), 0) AS buy_usd,
+                COALESCE(SUM(CASE WHEN side = 'A' THEN notional_usd ELSE 0 END), 0) AS sell_usd
+            FROM wallet_fill_events
+            WHERE wallet_id = ?
+              AND event_time_ms >= ?
+        """, (wallet_id, start_time_ms))
+        summary_row = await summary_cursor.fetchone()
+
+        asset_cursor = await self.conn.execute("""
+            SELECT
+                coin,
+                COUNT(*) AS fills_count,
+                COALESCE(SUM(CASE WHEN side = 'B' THEN notional_usd ELSE 0 END), 0) AS buy_usd,
+                COALESCE(SUM(CASE WHEN side = 'A' THEN notional_usd ELSE 0 END), 0) AS sell_usd
+            FROM wallet_fill_events
+            WHERE wallet_id = ?
+              AND event_time_ms >= ?
+            GROUP BY coin
+            ORDER BY ABS(
+                COALESCE(SUM(CASE WHEN side = 'B' THEN notional_usd ELSE 0 END), 0) -
+                COALESCE(SUM(CASE WHEN side = 'A' THEN notional_usd ELSE 0 END), 0)
+            ) DESC,
+            fills_count DESC
+        """, (wallet_id, start_time_ms))
+        asset_rows = await asset_cursor.fetchall()
+
+        recent_cursor = await self.conn.execute("""
+            SELECT coin, side, price, size, notional_usd, event_time_ms, dir
+            FROM wallet_fill_events
+            WHERE wallet_id = ?
+              AND event_time_ms >= ?
+            ORDER BY event_time_ms DESC, id DESC
+            LIMIT 20
+        """, (wallet_id, start_time_ms))
+        recent_rows = await recent_cursor.fetchall()
+
+        buy_usd = float(summary_row["buy_usd"] or 0)
+        sell_usd = float(summary_row["sell_usd"] or 0)
+        return {
+            "wallet": {
+                "id": wallet_row["id"],
+                "user_id": wallet_row["user_id"],
+                "address": wallet_row["address"],
+                "alias": wallet_row["alias"],
+                "active": bool(wallet_row["active"]),
+            },
+            "summary": {
+                "fills_count": summary_row["fills_count"] or 0,
+                "assets_count": summary_row["assets_count"] or 0,
+                "last_event_time_ms": summary_row["last_event_time_ms"],
+                "buy_usd": buy_usd,
+                "sell_usd": sell_usd,
+                "net_flow_usd": buy_usd - sell_usd,
+            },
+            "live": await self.get_wallet_live_snapshot(wallet_id),
+            "assets": [
+                {
+                    "coin": row["coin"],
+                    "fills_count": row["fills_count"],
+                    "buy_usd": float(row["buy_usd"] or 0),
+                    "sell_usd": float(row["sell_usd"] or 0),
+                    "net_flow_usd": float(row["buy_usd"] or 0) - float(row["sell_usd"] or 0),
+                }
+                for row in asset_rows
+            ],
+            "recent_fills": [
+                {
+                    "coin": row["coin"],
+                    "side": row["side"],
+                    "price": float(row["price"]),
+                    "size": float(row["size"]),
+                    "notional_usd": float(row["notional_usd"]),
+                    "event_time_ms": row["event_time_ms"],
+                    "dir": row["dir"],
+                }
+                for row in recent_rows
+            ],
+        }
 
     # EVM tracking operations
     async def add_evm_address(self, tracked_address: TrackedAddress) -> Optional[int]:

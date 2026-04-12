@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HyperTracker Dashboard</title>
+    <link rel="stylesheet" href="/dashboard/static/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Local Analytics</p>
+          <h1>HyperTracker Dashboard</h1>
+          <p class="hero-copy">
+            See what tracked wallets are accumulating, dumping, and rotating into across 1h, 4h, and 24h windows.
+          </p>
+        </div>
+        <div class="controls">
+          <div class="window-picker" id="window-picker">
+            <button data-window="1h" class="active">1H</button>
+            <button data-window="4h">4H</button>
+            <button data-window="24h">24H</button>
+            <button data-window="7d">7D</button>
+            <button data-window="30d">30D</button>
+          </div>
+          <button id="refresh-button" class="refresh-button">Refresh</button>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="panel overview-panel">
+          <div class="panel-header">
+            <h2>Overview</h2>
+            <span id="updated-at">Loading...</span>
+          </div>
+          <div class="overview-grid" id="overview-grid"></div>
+        </section>
+
+        <section class="panel live-overview-panel">
+          <div class="panel-header">
+            <h2>Live Status</h2>
+            <span>Cached Hyperliquid snapshots</span>
+          </div>
+          <div class="overview-grid live-grid" id="live-overview-grid"></div>
+        </section>
+
+        <section class="panel asset-panel">
+          <div class="panel-header">
+            <h2>Asset Flow</h2>
+            <span>Net buy vs sell across tracked wallets</span>
+          </div>
+          <div class="asset-list" id="asset-list"></div>
+        </section>
+
+        <section class="panel live-asset-panel">
+          <div class="panel-header">
+            <h2>Live Exposure</h2>
+            <span>Current long vs short notional by asset</span>
+          </div>
+          <div class="asset-list" id="live-asset-list"></div>
+        </section>
+
+        <section class="panel wallets-panel">
+          <div class="panel-header">
+            <h2>Wallet Watchlist</h2>
+            <span>Click a wallet for drill-down</span>
+          </div>
+          <div class="wallet-table-wrap">
+            <table class="wallet-table">
+              <thead>
+                <tr>
+                  <th>Wallet</th>
+                  <th>Net Flow</th>
+                  <th>Buy</th>
+                  <th>Sell</th>
+                  <th>Live Bias</th>
+                  <th>Open Pos.</th>
+                  <th>Account</th>
+                  <th>Assets</th>
+                  <th>Fills</th>
+                  <th>Last Seen</th>
+                </tr>
+              </thead>
+              <tbody id="wallet-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel activity-panel">
+          <div class="panel-header">
+            <h2>Recent Fills</h2>
+            <span>Newest activity in the selected time window</span>
+          </div>
+          <div class="activity-feed" id="activity-feed"></div>
+        </section>
+      </main>
+    </div>
+
+    <aside class="drawer hidden" id="wallet-drawer">
+      <div class="drawer-backdrop" id="drawer-backdrop"></div>
+      <div class="drawer-panel">
+        <div class="drawer-header">
+          <div>
+            <p class="eyebrow">Wallet Detail</p>
+            <h3 id="drawer-title">Wallet</h3>
+            <p id="drawer-subtitle"></p>
+          </div>
+          <button id="drawer-close" class="icon-button">×</button>
+        </div>
+        <div class="drawer-summary" id="drawer-summary"></div>
+        <div class="drawer-section">
+          <h4>Live Positions</h4>
+          <div id="drawer-live" class="drawer-fills"></div>
+        </div>
+        <div class="drawer-section">
+          <h4>Asset Breakdown</h4>
+          <div id="drawer-assets" class="drawer-assets"></div>
+        </div>
+        <div class="drawer-section">
+          <h4>Recent Wallet Fills</h4>
+          <div id="drawer-fills" class="drawer-fills"></div>
+        </div>
+      </div>
+    </aside>
+
+    <script src="/dashboard/static/app.js"></script>
+  </body>
+  </html>
