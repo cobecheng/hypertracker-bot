@@ -366,6 +366,19 @@ class Database:
                 created_at=datetime.fromisoformat(row['created_at'])
             ))
         return wallets
+
+    async def get_wallet_live_dexes(self, wallet_id: int) -> List[str]:
+        """Infer HIP-3 perp dex namespaces seen for a wallet from persisted fills."""
+        cursor = await self.conn.execute("""
+            SELECT DISTINCT substr(coin, 1, instr(coin, ':') - 1) AS dex
+            FROM wallet_fill_events
+            WHERE wallet_id = ?
+              AND instr(coin, ':') > 0
+              AND event_time_ms >= (CAST(strftime('%s', 'now') AS INTEGER) - 2592000) * 1000
+            ORDER BY dex
+        """, (wallet_id,))
+        rows = await cursor.fetchall()
+        return [row["dex"] for row in rows if row["dex"]]
     
     async def update_wallet_filters(self, wallet_id: int, filters: WalletFilters) -> bool:
         """Update wallet filters."""

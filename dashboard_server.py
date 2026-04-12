@@ -43,7 +43,7 @@ def get_window_start_ms(window: str) -> int:
     return int((now - mapping[window]).timestamp() * 1000)
 
 
-def parse_live_positions(snapshot: dict) -> tuple[list[dict], float, float, float]:
+def parse_live_positions(snapshot: dict) -> tuple[list[dict], float, float, float, float]:
     """Normalize Hyperliquid clearinghouse state into dashboard-friendly positions."""
     margin_summary = snapshot.get("marginSummary", {}) or {}
     account_value = float(margin_summary.get("accountValue", 0) or 0)
@@ -81,6 +81,40 @@ def parse_live_positions(snapshot: dict) -> tuple[list[dict], float, float, floa
     return positions, account_value, total_notional, withdrawable if withdrawable else 0.0, total_margin_used
 
 
+def merge_live_snapshots(snapshots: list[tuple[str, dict]]) -> tuple[list[dict], int, float, float, float, float, dict]:
+    """Merge default and HIP-3 perp dex snapshots into one combined wallet view."""
+    merged_positions: list[dict] = []
+    latest_snapshot_time_ms = 0
+    total_account_value = 0.0
+    total_notional_usd = 0.0
+    total_withdrawable = 0.0
+    total_margin_used = 0.0
+    raw_snapshots: dict[str, dict] = {}
+
+    for dex, snapshot in snapshots:
+        positions, account_value, notional_usd, withdrawable, margin_used = parse_live_positions(snapshot)
+        for position in positions:
+            position["dex"] = dex or "default"
+        merged_positions.extend(positions)
+        total_account_value += account_value
+        total_notional_usd += notional_usd
+        total_withdrawable += withdrawable
+        total_margin_used += margin_used
+        latest_snapshot_time_ms = max(latest_snapshot_time_ms, int(snapshot.get("time") or 0))
+        raw_snapshots[dex or "default"] = snapshot
+
+    merged_positions.sort(key=lambda item: item["position_notional_usd"], reverse=True)
+    return (
+        merged_positions,
+        latest_snapshot_time_ms,
+        total_account_value,
+        total_notional_usd,
+        total_withdrawable,
+        total_margin_used,
+        raw_snapshots,
+    )
+
+
 async def poll_live_snapshots():
     """Poll Hyperliquid live account state and cache it locally."""
     settings = get_settings()
@@ -92,14 +126,27 @@ async def poll_live_snapshots():
             active_wallets = await db.get_all_active_wallets()
             for wallet in active_wallets:
                 try:
-                    snapshot = await info_client.fetch_clearinghouse_state(wallet.address)
-                    snapshot_time_ms = int(snapshot.get("time") or int(datetime.now(timezone.utc).timestamp() * 1000))
-                    positions, account_value, total_notional, withdrawable, total_margin_used = parse_live_positions(snapshot)
+                    dexes = await db.get_wallet_live_dexes(wallet.id)
+                    snapshots: list[tuple[str, dict]] = [("", await info_client.fetch_clearinghouse_state(wallet.address))]
+                    for dex in dexes:
+                        snapshots.append((dex, await info_client.fetch_clearinghouse_state(wallet.address, dex=dex)))
+
+                    (
+                        positions,
+                        snapshot_time_ms,
+                        account_value,
+                        total_notional,
+                        withdrawable,
+                        total_margin_used,
+                        raw_snapshot,
+                    ) = merge_live_snapshots(snapshots)
+                    if not snapshot_time_ms:
+                        snapshot_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
                     await db.upsert_wallet_live_snapshot(
                         wallet=wallet,
                         snapshot_time_ms=snapshot_time_ms,
                         positions=positions,
-                        raw_snapshot=snapshot,
+                        raw_snapshot=raw_snapshot,
                         account_value=account_value,
                         total_notional_usd=total_notional,
                         total_margin_used=total_margin_used,

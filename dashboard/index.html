@@ -13,7 +13,7 @@
           <p class="eyebrow">Local Analytics</p>
           <h1>HyperTracker Dashboard</h1>
           <p class="hero-copy">
-            See what tracked wallets are accumulating, dumping, and rotating into across 1h, 4h, and 24h windows.
+            See what tracked wallets are accumulating, dumping, and rotating into across live snapshots and selectable historical windows.
           </p>
         </div>
         <div class="controls">
@@ -111,10 +111,12 @@
         <div class="drawer-summary" id="drawer-summary"></div>
         <div class="drawer-section">
           <h4>Live Positions</h4>
+          <p class="drawer-section-copy">Current open positions from the latest cached Hyperliquid snapshot.</p>
           <div id="drawer-live" class="drawer-fills"></div>
         </div>
         <div class="drawer-section">
-          <h4>Asset Breakdown</h4>
+          <h4>Historical Asset Flow</h4>
+          <p class="drawer-section-copy">Assets traded in the selected time window. These are not always still open live positions.</p>
           <div id="drawer-assets" class="drawer-assets"></div>
         </div>
         <div class="drawer-section">

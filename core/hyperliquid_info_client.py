@@ -27,7 +27,7 @@ class HyperliquidInfoClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def fetch_clearinghouse_state(self, user_address: str) -> dict[str, Any]:
+    async def fetch_clearinghouse_state(self, user_address: str, dex: str = "") -> dict[str, Any]:
         """Fetch live perpetual account state for a user."""
         await self._ensure_session()
 
@@ -35,15 +35,18 @@ class HyperliquidInfoClient:
             "type": "clearinghouseState",
             "user": user_address,
         }
+        if dex:
+            payload["dex"] = dex
 
         async with self._lock:
             async with self._session.post(self.rest_url, json=payload) as response:
                 if response.status != 200:
                     body = await response.text()
                     raise RuntimeError(
-                        f"Hyperliquid info request failed for {user_address}: "
+                        f"Hyperliquid info request failed for {user_address}"
+                        f"{f' on dex {dex}' if dex else ''}: "
                         f"HTTP {response.status} - {body[:200]}"
                     )
                 data = await response.json()
-                logger.debug("Fetched clearinghouseState for %s", user_address)
+                logger.debug("Fetched clearinghouseState for %s on dex %s", user_address, dex or "<default>")
                 return data

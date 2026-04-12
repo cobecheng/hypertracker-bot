@@ -25,6 +25,19 @@ function shortAddress(address) {
   return `${address.slice(0, 8)}...${address.slice(-6)}`;
 }
 
+function canonicalCoin(coin) {
+  if (!coin) return "UNKNOWN";
+  return String(coin).split(":").pop();
+}
+
+function renderCoinLabel(coin) {
+  const canonical = canonicalCoin(coin);
+  if (canonical === coin) {
+    return canonical;
+  }
+  return `${canonical} <span class="coin-alias">${coin}</span>`;
+}
+
 function relativeTime(timestampMs) {
   if (!timestampMs) return "No recent fills";
   const deltaSeconds = Math.max(0, Math.floor((Date.now() - timestampMs) / 1000));
@@ -86,7 +99,7 @@ function renderAssets(items) {
   assetList.innerHTML = items.map((asset) => `
     <div class="asset-row">
       <div>
-        <div class="asset-name">${asset.coin}</div>
+        <div class="asset-name">${renderCoinLabel(asset.coin)}</div>
         <div class="asset-meta">${asset.wallets_count} wallet(s) • ${asset.fills_count} fills</div>
       </div>
       <div class="asset-meta">Buy ${money(asset.buy_usd)}<br />Sell ${money(asset.sell_usd)}</div>
@@ -123,7 +136,7 @@ function renderLiveAssets(items) {
   liveAssetList.innerHTML = items.map((asset) => `
     <div class="asset-row">
       <div>
-        <div class="asset-name">${asset.coin}</div>
+        <div class="asset-name">${renderCoinLabel(asset.coin)}</div>
         <div class="asset-meta">${asset.wallets_count} wallet(s) live</div>
       </div>
       <div class="asset-meta">Long ${money(asset.long_usd)}<br />Short ${money(asset.short_usd)}</div>
@@ -173,7 +186,7 @@ function renderRecentFills(items) {
     return `
       <div class="activity-row">
         <div>
-          <div class="wallet-name">${fill.alias || shortAddress(fill.address)} • ${fill.coin}</div>
+          <div class="wallet-name">${fill.alias || shortAddress(fill.address)} • ${canonicalCoin(fill.coin)}</div>
           <div class="activity-meta">${fill.dir || label} • ${shortAddress(fill.address)}</div>
         </div>
         <div class="flow-pill ${netClass}">${label} ${money(fill.notional_usd)}</div>
@@ -201,11 +214,12 @@ function renderDrawer(detail) {
   `).join("");
 
   const live = detail.live;
+  const liveCoinSet = new Set((live?.positions || []).map((position) => canonicalCoin(position.coin)));
   document.getElementById("drawer-live").innerHTML = live && live.positions && live.positions.length
     ? live.positions.map((position) => `
         <div class="drawer-row live-position">
           <div>
-            <div class="drawer-asset-name">${position.coin} • <span class="position-side ${position.direction === "long" ? "long" : "short"}">${position.direction}</span></div>
+            <div class="drawer-asset-name">${renderCoinLabel(position.coin)} • <span class="position-side ${position.direction === "long" ? "long" : "short"}">${position.direction}</span></div>
             <div class="drawer-muted">Size ${position.size.toLocaleString()} @ $${position.entry_px.toLocaleString()}</div>
             <div class="drawer-muted">Unrealized PnL <span class="position-pnl ${flowClass(position.unrealized_pnl_usd)}">${money(position.unrealized_pnl_usd)}</span></div>
           </div>
@@ -216,15 +230,18 @@ function renderDrawer(detail) {
 
   const assets = detail.assets || [];
   document.getElementById("drawer-assets").innerHTML = assets.length
-    ? assets.map((asset) => `
+    ? assets.map((asset) => {
+        const isLive = liveCoinSet.has(canonicalCoin(asset.coin));
+        return `
         <div class="drawer-row">
           <div>
-            <div class="drawer-asset-name">${asset.coin}</div>
-            <div class="drawer-muted">${asset.fills_count} fills</div>
+            <div class="drawer-asset-name">${renderCoinLabel(asset.coin)}</div>
+            <div class="drawer-muted">${asset.fills_count} fills • <span class="asset-status ${isLive ? "is-live" : "not-live"}">${isLive ? "Still open live" : "No live position in latest snapshot"}</span></div>
           </div>
           <div class="flow-pill ${flowClass(asset.net_flow_usd)}">${money(asset.net_flow_usd)}</div>
         </div>
-      `).join("")
+      `;
+      }).join("")
     : `<div class="empty-state">No fills for this wallet in the selected window.</div>`;
 
   const fills = detail.recent_fills || [];
@@ -232,7 +249,7 @@ function renderDrawer(detail) {
     ? fills.map((fill) => `
         <div class="drawer-row">
           <div>
-            <div class="drawer-asset-name">${fill.coin} • ${fill.dir || (fill.side === "B" ? "Buy" : "Sell")}</div>
+            <div class="drawer-asset-name">${renderCoinLabel(fill.coin)} • ${fill.dir || (fill.side === "B" ? "Buy" : "Sell")}</div>
             <div class="drawer-muted">${relativeTime(fill.event_time_ms)}</div>
           </div>
           <div class="flow-pill ${fill.side === "B" ? "buy" : "sell"}">${money(fill.notional_usd)}</div>
