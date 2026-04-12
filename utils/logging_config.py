@@ -31,7 +31,7 @@ MAX_BYTES = 50 * 1024 * 1024  # 50 MB per file
 BACKUP_COUNT = 5  # Keep 5 backup files (total ~250 MB per log type)
 
 # Cleanup settings
-LOG_RETENTION_DAYS = 7  # Keep logs for 7 days
+LOG_RETENTION_DAYS = 3  # Keep logs for 3 days
 
 
 def setup_logging(log_level: str = "INFO") -> dict:

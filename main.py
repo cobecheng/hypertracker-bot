@@ -55,6 +55,7 @@ class HyperTrackerBot:
         # Start time for uptime tracking
         self.start_time = time.time()
         self.hourly_summary_task: asyncio.Task | None = None
+        self.log_cleanup_task: asyncio.Task | None = None
 
         # Liquidation statistics tracking (last hour)
         self.liq_stats = {
@@ -259,9 +260,24 @@ class HyperTrackerBot:
                 await self._process_single_wallet_hour(wallet, pending_hour_start)
                 pending_hour_start += timedelta(hours=1)
 
-        # Keep a week of raw fill history, which is enough for rollups and debugging.
-        cutoff_ms = int((now - timedelta(days=7)).timestamp() * 1000)
+        # Keep 30 days of raw fill history for dashboard analytics and comparisons.
+        cutoff_ms = int((now - timedelta(days=30)).timestamp() * 1000)
         await self.db.delete_fill_events_before(cutoff_ms)
+
+    async def periodic_log_cleanup_loop(self):
+        """Periodically delete old log files while the bot is running."""
+        await asyncio.sleep(60)
+
+        while True:
+            try:
+                from utils.logging_config import cleanup_old_logs
+                cleanup_old_logs()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Error cleaning up old logs: {e}", exc_info=True)
+
+            await asyncio.sleep(6 * 60 * 60)
 
     async def _process_single_wallet_hour(self, wallet: Wallet, hour_start: datetime):
         """Build and optionally send a summary for one completed hour."""
@@ -468,6 +484,7 @@ class HyperTrackerBot:
         # Start exchange liquidation monitoring in background
         asyncio.create_task(self.exchange_liq_ws.start())
         self.hourly_summary_task = asyncio.create_task(self.hourly_wallet_summary_loop())
+        self.log_cleanup_task = asyncio.create_task(self.periodic_log_cleanup_loop())
 
         # Start polling
         try:
@@ -484,6 +501,10 @@ class HyperTrackerBot:
             self.hourly_summary_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self.hourly_summary_task
+        if self.log_cleanup_task:
+            self.log_cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.log_cleanup_task
         await self.hyperliquid_ws.stop_all()
         await self.exchange_liq_ws.stop()
 
