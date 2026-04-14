@@ -2,6 +2,7 @@
 Message formatting utilities for beautiful Telegram notifications.
 """
 from datetime import datetime
+from html import escape
 from typing import Optional
 
 from core.models import HyperliquidFill, HyperliquidTwapOrder, LiquidationEvent, Wallet
@@ -38,8 +39,11 @@ def format_fill_notification(fill: HyperliquidFill, wallet: Wallet) -> str:
 
     # Wallet info - make address clickable for easy copying
     wallet_name = wallet.alias if wallet.alias else format_address(wallet.address)
-    # Using backticks makes the address selectable/copyable in Telegram
-    wallet_line = f"Wallet: {wallet_name} (`{wallet.address}`)"
+    wallet_link = f"https://hypurrscan.io/address/{wallet.address}#perps"
+    wallet_line = (
+        f"Wallet: {escape(wallet_name)} "
+        f"(<a href=\"{escape(wallet_link, quote=True)}\">{escape(wallet.address)}</a>)"
+    )
 
     # Determine side and action using Hyperliquid's dir field
     is_buy = fill.side == "B"
@@ -71,7 +75,7 @@ def format_fill_notification(fill: HyperliquidFill, wallet: Wallet) -> str:
         else:
             action = "Open Long" if is_buy else "Open Short"
 
-    side_line = f"{side_emoji} {side_text} {fill.coin} — {action}"
+    side_line = f"{side_emoji} {escape(side_text)} {escape(fill.coin)} — {escape(action)}"
     
     # Price and size
     try:
@@ -80,10 +84,10 @@ def format_fill_notification(fill: HyperliquidFill, wallet: Wallet) -> str:
         notional = price * size
         
         price_line = f"💰 Price: {price:,.4f} USDC"
-        size_line = f"📦 Size: {size:,.2f} {fill.coin} (${notional:,.2f})"
+        size_line = f"📦 Size: {size:,.2f} {escape(fill.coin)} (${notional:,.2f})"
     except (ValueError, TypeError):
-        price_line = f"💰 Price: {fill.px} USDC"
-        size_line = f"📦 Size: {fill.sz} {fill.coin}"
+        price_line = f"💰 Price: {escape(fill.px)} USDC"
+        size_line = f"📦 Size: {escape(fill.sz)} {escape(fill.coin)}"
     
     # PNL (if closing)
     pnl_line = ""
@@ -100,7 +104,7 @@ def format_fill_notification(fill: HyperliquidFill, wallet: Wallet) -> str:
             else:
                 pnl_line = f"{pnl_emoji} Realized PNL: {pnl_sign}{pnl:,.2f} USDC"
         except (ValueError, TypeError):
-            pnl_line = f"🤑 Realized PNL: {fill.closed_pnl} USDC"
+            pnl_line = f"🤑 Realized PNL: {escape(fill.closed_pnl)} USDC"
     
     # Fee
     fee_line = ""
@@ -109,19 +113,19 @@ def format_fill_notification(fill: HyperliquidFill, wallet: Wallet) -> str:
             fee = float(fill.fee)
             fee_line = f"💸 Fee: {fee:,.4f} USDC"
         except (ValueError, TypeError):
-            fee_line = f"💸 Fee: {fill.fee} USDC"
+            fee_line = f"💸 Fee: {escape(fill.fee)} USDC"
     
     # Timestamp
     try:
         timestamp = datetime.fromtimestamp(fill.time / 1000)
         time_line = f"🕒 {timestamp.strftime('%d/%m/%Y, %I:%M:%S %p')} UTC"
     except:
-        time_line = f"🕒 {fill.time}"
+        time_line = f"🕒 {escape(str(fill.time))}"
     
     # Links
     tx_link = ""
     if fill.hash:
-        tx_link = f"🔗 https://hypurrscan.io/tx/{fill.hash}"
+        tx_link = f"🔗 https://hypurrscan.io/tx/{escape(fill.hash)}"
 
     # Assemble message
     lines = [

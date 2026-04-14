@@ -105,7 +105,7 @@ class Notifier:
         try:
             message = format_fill_notification(fill, wallet)
             chat_id, thread_id = self._get_destination(user_id, 'trades')
-            await self._send_message(chat_id, message, thread_id)
+            await self._send_message(chat_id, message, thread_id, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Error sending fill notification to {user_id}: {e}")
 
@@ -161,7 +161,13 @@ class Notifier:
         except Exception as e:
             logger.error(f"Error sending TWAP notification to {user_id}: {e}")
     
-    async def _send_message(self, chat_id: int, text: str, message_thread_id: Optional[int] = None):
+    async def _send_message(
+        self,
+        chat_id: int,
+        text: str,
+        message_thread_id: Optional[int] = None,
+        parse_mode: Optional[str] = None,
+    ):
         """
         Send message with rate limiting and error handling.
 
@@ -169,6 +175,7 @@ class Notifier:
             chat_id: Telegram chat ID (user, group, or supergroup)
             text: Message text to send
             message_thread_id: Optional topic/thread ID for supergroups
+            parse_mode: Optional Telegram parse mode
         """
         # Rate limiting
         await asyncio.sleep(self._rate_limit_delay)
@@ -178,7 +185,7 @@ class Notifier:
                 chat_id=chat_id,
                 text=text,
                 message_thread_id=message_thread_id,
-                parse_mode=None,  # Plain text for better emoji support
+                parse_mode=parse_mode,
                 disable_web_page_preview=True
             )
 
@@ -191,7 +198,7 @@ class Notifier:
                 chat_id=chat_id,
                 text=text,
                 message_thread_id=message_thread_id,
-                parse_mode=None,
+                parse_mode=parse_mode,
                 disable_web_page_preview=True
             )
 
