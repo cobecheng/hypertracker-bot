@@ -11,14 +11,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import get_settings
-from core.database import Database
+from core.database_factory import create_database
 from core.models import NotificationType
 
 
 async def migrate():
     """Enable TWAP notifications for all existing wallets."""
     settings = get_settings()
-    db = Database(settings.database_path)
+    db = create_database(settings)
 
     await db.connect()
 

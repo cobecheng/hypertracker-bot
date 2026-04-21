@@ -3,7 +3,7 @@ Configuration module for HyperTracker Bot.
 Loads environment variables and provides application settings.
 """
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -25,7 +25,9 @@ class Settings(BaseSettings):
     ca_tracking_chat_id: Optional[str] = None  # For EVM contract tracking alerts
 
     # Database Configuration
+    database_backend: Literal["sqlite", "postgres"] = "sqlite"
     database_path: str = "./data/hypertracker.db"
+    database_url: Optional[str] = None
     
     # WebSocket Configuration
     hyperliquid_ws_url: str = "wss://api.hyperliquid.xyz/ws"
@@ -69,5 +71,7 @@ def get_settings() -> Settings:
 def ensure_data_directory():
     """Ensure the data directory exists for the database."""
     settings = get_settings()
+    if settings.database_backend != "sqlite":
+        return
     db_path = Path(settings.database_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)

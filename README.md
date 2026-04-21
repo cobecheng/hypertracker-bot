@@ -181,7 +181,9 @@ hypertracker_bot/
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `BOT_TOKEN` | Telegram bot token | **Required** |
+| `DATABASE_BACKEND` | Database backend (`sqlite` now, `postgres` later) | `sqlite` |
 | `DATABASE_PATH` | SQLite database path | `./data/hypertracker.db` |
+| `DATABASE_URL` | Future Postgres/Supabase connection string | `None` |
 | `HYPERLIQUID_WS_URL` | Hyperliquid WebSocket URL | `wss://api.hyperliquid.xyz/ws` |
 | `HYPERLIQUID_REST_URL` | Hyperliquid REST API URL | `https://api.hyperliquid.xyz/info` |
 | `CHAOS_LABS_WS_URL` | Chaos Labs WebSocket URL | `wss://data.chaoslabs.xyz/ws/liquidations` |

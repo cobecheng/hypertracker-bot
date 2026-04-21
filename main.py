@@ -14,6 +14,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import get_settings, ensure_data_directory
 from core.database import Database
+from core.database_factory import create_database
 from core.hyperliquid_ws_pool import HyperliquidWebSocketPool
 from core.exchange_liquidations_ws import MultiExchangeLiquidationWS
 from core.models import (
@@ -72,7 +73,7 @@ class HyperTrackerBot:
         ensure_data_directory()
         
         # Initialize database
-        self.db = Database(self.settings.database_path)
+        self.db = create_database(self.settings)
         await self.db.connect()
         
         # Initialize notifier

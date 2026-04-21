@@ -279,6 +279,32 @@ class Database:
         except Exception as e:
             logger.error(f"Error updating global wallet filters for {telegram_id}: {e}")
             return False
+
+    async def update_user_settings(self, telegram_id: int, settings: UserSettings) -> bool:
+        """Update the full settings row for a user."""
+        try:
+            global_filters_json = (
+                json.dumps(settings.global_wallet_filters.model_dump())
+                if settings.global_wallet_filters else None
+            )
+            await self.conn.execute("""
+                INSERT INTO settings (user_id, liq_monitor_enabled, liq_filters_json, global_wallet_filters_json)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    liq_monitor_enabled = excluded.liq_monitor_enabled,
+                    liq_filters_json = excluded.liq_filters_json,
+                    global_wallet_filters_json = excluded.global_wallet_filters_json
+            """, (
+                telegram_id,
+                int(settings.liquidation_filters.enabled),
+                json.dumps(settings.liquidation_filters.model_dump()),
+                global_filters_json,
+            ))
+            await self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating user settings for {telegram_id}: {e}")
+            return False
     
     # Wallet operations
     async def add_wallet(self, wallet: Wallet) -> Optional[int]:

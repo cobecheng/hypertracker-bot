@@ -22,6 +22,7 @@ except ImportError:
 
 from config import get_settings, ensure_data_directory
 from core.database import Database
+from core.database_factory import create_database
 from bot.notifier import Notifier
 from aiogram import Bot
 from bot.handlers import alchemy_webhook
@@ -52,7 +53,7 @@ async def lifespan(app: FastAPI):
     ensure_data_directory()
 
     # Initialize database
-    db = Database(settings.database_path)
+    db = create_database(settings)
     await db.connect()
     logger.info("Database connected")
 

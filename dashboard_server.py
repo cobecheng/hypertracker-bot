@@ -16,6 +16,7 @@ import uvicorn
 
 from config import ensure_data_directory, get_settings
 from core.database import Database
+from core.database_factory import create_database
 from core.hyperliquid_info_client import HyperliquidInfoClient
 
 
@@ -171,7 +172,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     ensure_data_directory()
 
-    db = Database(settings.database_path)
+    db = create_database(settings)
     await db.connect()
     info_client = HyperliquidInfoClient(settings.hyperliquid_rest_url)
     live_poll_task = asyncio.create_task(poll_live_snapshots())
