@@ -15,6 +15,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import get_settings, ensure_data_directory
 from core.database import Database
 from core.database_factory import create_database
+from core.hyperliquid_info_client import HyperliquidInfoClient
 from core.hyperliquid_ws_pool import HyperliquidWebSocketPool
 from core.exchange_liquidations_ws import MultiExchangeLiquidationWS
 from core.models import (
@@ -22,6 +23,7 @@ from core.models import (
     HyperliquidTwapOrder, LiquidationEvent, Wallet
 )
 from bot.notifier import Notifier
+from bot.auth import AuthorizedUserMiddleware
 from bot.handlers import commands, callbacks, evm_commands
 from utils.filters import should_notify_fill, should_notify_liquidation
 from utils.logging_config import setup_logging
@@ -31,6 +33,71 @@ loggers = setup_logging(log_level="INFO")
 logger = loggers['system']
 liquidations_logger = loggers['liquidations']
 fills_logger = loggers['fills']
+
+
+def parse_live_positions(snapshot: dict) -> tuple[list[dict], float, float, float, float]:
+    """Normalize Hyperliquid clearinghouse state into dashboard-friendly positions."""
+    margin_summary = snapshot.get("marginSummary", {}) or {}
+    account_value = float(margin_summary.get("accountValue", 0) or 0)
+    total_margin_used = float(margin_summary.get("totalMarginUsed", 0) or 0)
+    withdrawable = float(snapshot.get("withdrawable", 0) or 0)
+
+    positions = []
+    for item in snapshot.get("assetPositions", []) or []:
+        position = item.get("position", {}) or {}
+        size = float(position.get("szi", 0) or 0)
+        if size == 0:
+            continue
+
+        positions.append({
+            "coin": position.get("coin") or "UNKNOWN",
+            "direction": "long" if size > 0 else "short",
+            "size": abs(size),
+            "signed_size": size,
+            "entry_px": float(position.get("entryPx", 0) or 0),
+            "position_notional_usd": abs(float(position.get("positionValue", 0) or 0)),
+            "unrealized_pnl_usd": float(position.get("unrealizedPnl", 0) or 0),
+            "leverage": float(((position.get("leverage") or {}).get("value")) or 0),
+            "liquidation_px": float(position.get("liquidationPx", 0) or 0),
+        })
+
+    total_notional = sum(position["position_notional_usd"] for position in positions)
+    positions.sort(key=lambda item: item["position_notional_usd"], reverse=True)
+    return positions, account_value, total_notional, withdrawable, total_margin_used
+
+
+def merge_live_snapshots(snapshots: list[tuple[str, dict]]) -> tuple[list[dict], int, float, float, float, float, dict]:
+    """Merge default and HIP-3 perp dex snapshots into one combined wallet view."""
+    merged_positions: list[dict] = []
+    latest_snapshot_time_ms = 0
+    total_account_value = 0.0
+    total_notional_usd = 0.0
+    total_withdrawable = 0.0
+    total_margin_used = 0.0
+    raw_snapshots: dict[str, dict] = {}
+
+    for dex, snapshot in snapshots:
+        positions, account_value, notional_usd, withdrawable, margin_used = parse_live_positions(snapshot)
+        for position in positions:
+            position["dex"] = dex or "default"
+        merged_positions.extend(positions)
+        total_account_value += account_value
+        total_notional_usd += notional_usd
+        total_withdrawable += withdrawable
+        total_margin_used += margin_used
+        latest_snapshot_time_ms = max(latest_snapshot_time_ms, int(snapshot.get("time") or 0))
+        raw_snapshots[dex or "default"] = snapshot
+
+    merged_positions.sort(key=lambda item: item["position_notional_usd"], reverse=True)
+    return (
+        merged_positions,
+        latest_snapshot_time_ms,
+        total_account_value,
+        total_notional_usd,
+        total_withdrawable,
+        total_margin_used,
+        raw_snapshots,
+    )
 
 
 class HyperTrackerBot:
@@ -49,6 +116,7 @@ class HyperTrackerBot:
         # WebSocket clients
         self.hyperliquid_ws: HyperliquidWebSocketPool = None
         self.exchange_liq_ws: MultiExchangeLiquidationWS = None
+        self.info_client: HyperliquidInfoClient | None = None
         
         # Wallet tracking
         self.wallet_map: Dict[str, list[Wallet]] = {}  # address -> list of wallets
@@ -57,6 +125,7 @@ class HyperTrackerBot:
         self.start_time = time.time()
         self.hourly_summary_task: asyncio.Task | None = None
         self.log_cleanup_task: asyncio.Task | None = None
+        self.live_snapshot_task: asyncio.Task | None = None
 
         # Liquidation statistics tracking (last hour)
         self.liq_stats = {
@@ -78,6 +147,11 @@ class HyperTrackerBot:
         
         # Initialize notifier
         self.notifier = Notifier(self.bot)
+
+        # Restrict interactive bot usage when WHITELISTED_USER_ID is configured.
+        auth_middleware = AuthorizedUserMiddleware(self.settings)
+        self.dp.message.middleware(auth_middleware)
+        self.dp.callback_query.middleware(auth_middleware)
         
         # Setup handlers
         commands.db = self.db
@@ -117,6 +191,7 @@ class HyperTrackerBot:
             ping_interval=self.settings.ws_ping_interval,
             ping_timeout=self.settings.ws_ping_timeout
         )
+        self.info_client = HyperliquidInfoClient(self.settings.hyperliquid_rest_url)
 
         # Set WebSocket callbacks
         self.hyperliquid_ws.on_fill = self.handle_fill
@@ -279,6 +354,57 @@ class HyperTrackerBot:
                 logger.error(f"Error cleaning up old logs: {e}", exc_info=True)
 
             await asyncio.sleep(6 * 60 * 60)
+
+    async def live_snapshot_loop(self):
+        """Keep live wallet snapshots current for the hosted dashboard."""
+        await asyncio.sleep(10)
+        interval = max(15, self.settings.dashboard_live_poll_interval_seconds)
+
+        while True:
+            try:
+                active_wallets = await self.db.get_all_active_wallets()
+                for wallet in active_wallets:
+                    if wallet.id is None:
+                        continue
+                    try:
+                        dexes = await self.db.get_wallet_live_dexes(wallet.id)
+                        snapshots: list[tuple[str, dict]] = [
+                            ("", await self.info_client.fetch_clearinghouse_state(wallet.address))
+                        ]
+                        for dex in dexes:
+                            snapshots.append((dex, await self.info_client.fetch_clearinghouse_state(wallet.address, dex=dex)))
+
+                        (
+                            positions,
+                            snapshot_time_ms,
+                            account_value,
+                            total_notional,
+                            withdrawable,
+                            total_margin_used,
+                            raw_snapshot,
+                        ) = merge_live_snapshots(snapshots)
+                        if not snapshot_time_ms:
+                            snapshot_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+                        await self.db.upsert_wallet_live_snapshot(
+                            wallet=wallet,
+                            snapshot_time_ms=snapshot_time_ms,
+                            positions=positions,
+                            raw_snapshot=raw_snapshot,
+                            account_value=account_value,
+                            total_notional_usd=total_notional,
+                            total_margin_used=total_margin_used,
+                            withdrawable=withdrawable,
+                        )
+                    except Exception as wallet_error:
+                        logger.error(f"Live snapshot refresh failed for {wallet.address}: {wallet_error}", exc_info=True)
+                    await asyncio.sleep(0.35)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Error refreshing live wallet snapshots: {e}", exc_info=True)
+
+            await asyncio.sleep(interval)
 
     async def _process_single_wallet_hour(self, wallet: Wallet, hour_start: datetime):
         """Build and optionally send a summary for one completed hour."""
@@ -486,6 +612,7 @@ class HyperTrackerBot:
         asyncio.create_task(self.exchange_liq_ws.start())
         self.hourly_summary_task = asyncio.create_task(self.hourly_wallet_summary_loop())
         self.log_cleanup_task = asyncio.create_task(self.periodic_log_cleanup_loop())
+        self.live_snapshot_task = asyncio.create_task(self.live_snapshot_loop())
 
         # Start polling
         try:
@@ -506,8 +633,14 @@ class HyperTrackerBot:
             self.log_cleanup_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self.log_cleanup_task
+        if self.live_snapshot_task:
+            self.live_snapshot_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.live_snapshot_task
         await self.hyperliquid_ws.stop_all()
         await self.exchange_liq_ws.stop()
+        if self.info_client:
+            await self.info_client.close()
 
         # Close database
         await self.db.close()

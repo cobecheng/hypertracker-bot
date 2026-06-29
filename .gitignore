@@ -56,3 +56,7 @@ launchd/
 # OS
 .DS_Store
 Thumbs.db
+
+# Other local projects that should never be committed into Hypertracker
+telegram-autoforwarder/
+repo_inspect/

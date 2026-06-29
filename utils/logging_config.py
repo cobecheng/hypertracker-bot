@@ -11,6 +11,7 @@ Features:
 import logging
 import logging.handlers
 import os
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 import glob
@@ -53,10 +54,14 @@ def setup_logging(log_level: str = "INFO") -> dict:
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    # Console handler (for real-time monitoring)
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(level)
-    console_handler.setFormatter(formatter)
+    # Console handler is only useful for interactive runs.
+    # Under launchd, stderr is redirected to a file, so mirroring INFO logs there
+    # creates a large duplicate log that grows much faster than the structured files.
+    console_handler = None
+    if sys.stderr and sys.stderr.isatty():
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(level)
+        console_handler.setFormatter(formatter)
 
     # ===== SYSTEM LOG =====
     # Main application log with rotation
@@ -106,7 +111,8 @@ def setup_logging(log_level: str = "INFO") -> dict:
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
     root_logger.handlers.clear()  # Remove any existing handlers
-    root_logger.addHandler(console_handler)
+    if console_handler:
+        root_logger.addHandler(console_handler)
     root_logger.addHandler(system_handler)
     root_logger.addHandler(errors_handler)
 

@@ -5,6 +5,7 @@ Backed by asyncpg and designed for Supabase/Postgres deployments.
 import hashlib
 import json
 import logging
+import asyncio
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -30,6 +31,7 @@ class PostgresDatabase:
     def __init__(self, database_url: str):
         self.database_url = database_url
         self.conn: Optional[asyncpg.Connection] = None
+        self._conn_lock = asyncio.Lock()
 
     async def connect(self):
         self.conn = await asyncpg.connect(self.database_url)
@@ -41,10 +43,47 @@ class PostgresDatabase:
             await self.conn.close()
             logger.info("Postgres database connection closed")
 
+    async def _reconnect(self):
+        """Re-establish a dropped postgres connection."""
+        try:
+            if self.conn and not self.conn.is_closed():
+                await self.conn.close()
+        except Exception:
+            pass
+        self.conn = await asyncpg.connect(self.database_url)
+        logger.warning("Postgres connection was re-established after disconnect")
+
+    async def _ensure_connection(self):
+        if self.conn is None or self.conn.is_closed():
+            await self._reconnect()
+
+    async def _call(self, method_name: str, *args):
+        async with self._conn_lock:
+            await self._ensure_connection()
+            method = getattr(self.conn, method_name)
+            try:
+                return await method(*args)
+            except (asyncpg.InterfaceError, asyncpg.ConnectionDoesNotExistError, OSError):
+                await self._reconnect()
+                method = getattr(self.conn, method_name)
+                return await method(*args)
+
+    async def _execute(self, *args):
+        return await self._call("execute", *args)
+
+    async def _fetchrow(self, *args):
+        return await self._call("fetchrow", *args)
+
+    async def _fetch(self, *args):
+        return await self._call("fetch", *args)
+
+    async def _fetchval(self, *args):
+        return await self._call("fetchval", *args)
+
     async def _create_tables(self):
         """Validate schema presence. Schema creation is managed by sql/supabase_schema.sql."""
         try:
-            exists = await self.conn.fetchval(
+            exists = await self._fetchval(
                 "select exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'users')"
             )
             if not exists:
@@ -80,7 +119,7 @@ class PostgresDatabase:
 
     async def create_user(self, telegram_id: int, username: Optional[str] = None) -> bool:
         try:
-            await self.conn.execute(
+            await self._execute(
                 """
                 insert into public.users (telegram_id, username, created_at)
                 values ($1, $2, $3)
@@ -97,7 +136,7 @@ class PostgresDatabase:
 
     async def get_user_settings(self, telegram_id: int) -> UserSettings:
         await self.create_user(telegram_id)
-        row = await self.conn.fetchrow(
+        row = await self._fetchrow(
             "select * from public.settings where user_id = $1",
             telegram_id,
         )
@@ -114,7 +153,7 @@ class PostgresDatabase:
             )
 
         default_filters = LiquidationFilters()
-        await self.conn.execute(
+        await self._execute(
             """
             insert into public.settings (user_id, liq_monitor_enabled, liq_filters_json, global_wallet_filters_json)
             values ($1, $2, $3, $4)
@@ -128,7 +167,7 @@ class PostgresDatabase:
 
     async def update_liquidation_settings(self, telegram_id: int, filters: LiquidationFilters) -> bool:
         try:
-            await self.conn.execute(
+            await self._execute(
                 """
                 insert into public.settings (user_id, liq_monitor_enabled, liq_filters_json, global_wallet_filters_json)
                 values ($1, $2, $3, null)
@@ -148,7 +187,7 @@ class PostgresDatabase:
     async def update_global_wallet_filters(self, telegram_id: int, filters: Optional[WalletFilters]) -> bool:
         try:
             filters_json = json.dumps(filters.model_dump()) if filters else None
-            await self.conn.execute(
+            await self._execute(
                 """
                 insert into public.settings (user_id, liq_monitor_enabled, liq_filters_json, global_wallet_filters_json)
                 values ($1, false, '{}'::jsonb, $2)
@@ -165,7 +204,7 @@ class PostgresDatabase:
 
     async def update_user_settings(self, telegram_id: int, settings: UserSettings) -> bool:
         try:
-            await self.conn.execute(
+            await self._execute(
                 """
                 insert into public.settings (user_id, liq_monitor_enabled, liq_filters_json, global_wallet_filters_json)
                 values ($1, $2, $3, $4)
@@ -186,7 +225,7 @@ class PostgresDatabase:
 
     async def add_wallet(self, wallet: Wallet) -> Optional[int]:
         try:
-            row = await self.conn.fetchrow(
+            row = await self._fetchrow(
                 """
                 insert into public.wallets (user_id, address, alias, filters_json, active, created_at)
                 values ($1, $2, $3, $4, $5, $6)
@@ -208,26 +247,26 @@ class PostgresDatabase:
             return None
 
     async def get_user_wallets(self, user_id: int) -> List[Wallet]:
-        rows = await self.conn.fetch(
+        rows = await self._fetch(
             "select * from public.wallets where user_id = $1 order by created_at desc",
             user_id,
         )
         return [self._wallet_from_row(row) for row in rows]
 
     async def get_wallet_by_id(self, wallet_id: int) -> Optional[Wallet]:
-        row = await self.conn.fetchrow(
+        row = await self._fetchrow(
             "select * from public.wallets where id = $1",
             wallet_id,
         )
         return self._wallet_from_row(row) if row else None
 
     async def get_all_active_wallets(self) -> List[Wallet]:
-        rows = await self.conn.fetch("select * from public.wallets where active = true")
+        rows = await self._fetch("select * from public.wallets where active = true")
         return [self._wallet_from_row(row) for row in rows]
 
     async def get_wallet_live_dexes(self, wallet_id: int) -> List[str]:
         cutoff_ms = int((datetime.now(timezone.utc).timestamp() - 2592000) * 1000)
-        rows = await self.conn.fetch(
+        rows = await self._fetch(
             """
             select distinct split_part(coin, ':', 1) as dex
             from public.wallet_fill_events
@@ -243,7 +282,7 @@ class PostgresDatabase:
 
     async def update_wallet_filters(self, wallet_id: int, filters: WalletFilters) -> bool:
         try:
-            await self.conn.execute(
+            await self._execute(
                 "update public.wallets set filters_json = $1 where id = $2",
                 json.dumps(filters.model_dump()),
                 wallet_id,
@@ -255,7 +294,7 @@ class PostgresDatabase:
 
     async def update_wallet_active(self, wallet_id: int, active: bool) -> bool:
         try:
-            await self.conn.execute(
+            await self._execute(
                 "update public.wallets set active = $1 where id = $2",
                 active,
                 wallet_id,
@@ -267,7 +306,7 @@ class PostgresDatabase:
 
     async def delete_wallet(self, wallet_id: int, user_id: int) -> bool:
         try:
-            result = await self.conn.execute(
+            result = await self._execute(
                 "delete from public.wallets where id = $1 and user_id = $2",
                 wallet_id,
                 user_id,
@@ -279,7 +318,7 @@ class PostgresDatabase:
 
     async def get_all_users(self) -> List[UserSettings]:
         try:
-            rows = await self.conn.fetch("select telegram_id from public.users")
+            rows = await self._fetch("select telegram_id from public.users")
             return [await self.get_user_settings(row["telegram_id"]) for row in rows]
         except Exception as e:
             logger.error(f"Error getting all users: {e}")
@@ -308,7 +347,7 @@ class PostgresDatabase:
                 fill.dir or "",
             ])
             event_id = hashlib.sha1(raw_key.encode("utf-8")).hexdigest()
-            await self.conn.execute(
+            await self._execute(
                 """
                 insert into public.wallet_fill_events (
                     wallet_id, user_id, wallet_address, coin, side, price, size,
@@ -342,7 +381,7 @@ class PostgresDatabase:
             return False
 
     async def get_last_summary_hour_start_ms(self, wallet_id: int) -> Optional[int]:
-        row = await self.conn.fetchrow(
+        row = await self._fetchrow(
             "select last_completed_hour_start_ms from public.wallet_hourly_summary_state where wallet_id = $1",
             wallet_id,
         )
@@ -350,7 +389,7 @@ class PostgresDatabase:
 
     async def mark_summary_hour_processed(self, wallet_id: int, hour_start_ms: int) -> bool:
         try:
-            await self.conn.execute(
+            await self._execute(
                 """
                 insert into public.wallet_hourly_summary_state (wallet_id, last_completed_hour_start_ms, updated_at)
                 values ($1, $2, $3)
@@ -369,7 +408,7 @@ class PostgresDatabase:
 
     async def get_wallet_fill_summary(self, wallet_id: int, start_time_ms: int, end_time_ms: int) -> dict:
         summary = {"total_fills": 0, "total_buy_usd": 0.0, "total_sell_usd": 0.0, "net_flow_usd": 0.0, "assets": []}
-        totals = await self.conn.fetchrow(
+        totals = await self._fetchrow(
             """
             select
                 count(*) as total_fills,
@@ -387,7 +426,7 @@ class PostgresDatabase:
             summary["total_buy_usd"] = float(totals["total_buy_usd"] or 0)
             summary["total_sell_usd"] = float(totals["total_sell_usd"] or 0)
             summary["net_flow_usd"] = summary["total_buy_usd"] - summary["total_sell_usd"]
-        rows = await self.conn.fetch(
+        rows = await self._fetch(
             """
             select
                 coin,
@@ -422,7 +461,7 @@ class PostgresDatabase:
 
     async def delete_fill_events_before(self, cutoff_time_ms: int) -> bool:
         try:
-            await self.conn.execute("delete from public.wallet_fill_events where event_time_ms < $1", cutoff_time_ms)
+            await self._execute("delete from public.wallet_fill_events where event_time_ms < $1", cutoff_time_ms)
             return True
         except Exception as e:
             logger.error(f"Error deleting old fill events: {e}")
@@ -436,7 +475,7 @@ class PostgresDatabase:
         bias = "long" if long_count > short_count else "short" if short_count > long_count else "flat"
         snapshot_time_iso = datetime.fromtimestamp(snapshot_time_ms / 1000, tz=timezone.utc)
         try:
-            await self.conn.execute(
+            await self._execute(
                 """
                 insert into public.wallet_live_snapshots (
                     wallet_id, user_id, wallet_address, account_value,
@@ -475,7 +514,7 @@ class PostgresDatabase:
             return False
 
     async def get_live_dashboard_overview(self) -> dict:
-        row = await self.conn.fetchrow(
+        row = await self._fetchrow(
             """
             select
                 count(*) as wallets_with_snapshot,
@@ -499,7 +538,7 @@ class PostgresDatabase:
         }
 
     async def get_live_asset_exposure(self, limit: int = 25) -> List[dict]:
-        rows = await self.conn.fetch("select wallet_address, positions_json from public.wallet_live_snapshots")
+        rows = await self._fetch("select wallet_address, positions_json from public.wallet_live_snapshots")
         exposures: dict[str, dict] = {}
         for row in rows:
             positions = _load_json(row["positions_json"])
@@ -523,7 +562,7 @@ class PostgresDatabase:
         return sorted(exposures.values(), key=lambda item: abs(item["net_usd"]), reverse=True)[:limit]
 
     async def get_wallet_live_snapshot(self, wallet_id: int) -> Optional[dict]:
-        row = await self.conn.fetchrow("select * from public.wallet_live_snapshots where wallet_id = $1", wallet_id)
+        row = await self._fetchrow("select * from public.wallet_live_snapshots where wallet_id = $1", wallet_id)
         if not row:
             return None
         return {
@@ -543,7 +582,7 @@ class PostgresDatabase:
         }
 
     async def get_dashboard_overview(self, start_time_ms: int) -> dict:
-        row = await self.conn.fetchrow(
+        row = await self._fetchrow(
             """
             select
                 count(distinct w.id) as tracked_wallets,
@@ -572,7 +611,7 @@ class PostgresDatabase:
         }
 
     async def get_dashboard_asset_flows(self, start_time_ms: int, limit: int = 25) -> List[dict]:
-        rows = await self.conn.fetch(
+        rows = await self._fetch(
             """
             select
                 e.coin,
@@ -601,7 +640,7 @@ class PostgresDatabase:
         return assets
 
     async def get_dashboard_wallet_summaries(self, start_time_ms: int, limit: int = 100) -> List[dict]:
-        rows = await self.conn.fetch(
+        rows = await self._fetch(
             """
             select
                 w.id, w.user_id, w.address, w.alias,
@@ -637,7 +676,7 @@ class PostgresDatabase:
         return wallets
 
     async def get_recent_fill_events(self, start_time_ms: int, limit: int = 50) -> List[dict]:
-        rows = await self.conn.fetch(
+        rows = await self._fetch(
             """
             select e.wallet_id, w.alias, w.address, e.coin, e.side, e.price, e.size, e.notional_usd, e.event_time_ms, e.dir
             from public.wallet_fill_events e
@@ -656,17 +695,17 @@ class PostgresDatabase:
         } for row in rows]
 
     async def get_wallet_dashboard_detail(self, wallet_id: int, start_time_ms: int) -> Optional[dict]:
-        wallet_row = await self.conn.fetchrow("select id, user_id, address, alias, active from public.wallets where id = $1", wallet_id)
+        wallet_row = await self._fetchrow("select id, user_id, address, alias, active from public.wallets where id = $1", wallet_id)
         if not wallet_row:
             return None
-        summary_row = await self.conn.fetchrow(
+        summary_row = await self._fetchrow(
             """
             select count(*) as fills_count, count(distinct coin) as assets_count, max(event_time_ms) as last_event_time_ms,
                    coalesce(sum(case when side='B' then notional_usd else 0 end),0) as buy_usd,
                    coalesce(sum(case when side='A' then notional_usd else 0 end),0) as sell_usd
             from public.wallet_fill_events where wallet_id = $1 and event_time_ms >= $2
             """, wallet_id, start_time_ms)
-        asset_rows = await self.conn.fetch(
+        asset_rows = await self._fetch(
             """
             select coin, count(*) as fills_count,
                    coalesce(sum(case when side='B' then notional_usd else 0 end),0) as buy_usd,
@@ -679,7 +718,7 @@ class PostgresDatabase:
                 coalesce(sum(case when side='A' then notional_usd else 0 end),0)
             ) desc, fills_count desc
             """, wallet_id, start_time_ms)
-        recent_rows = await self.conn.fetch(
+        recent_rows = await self._fetch(
             """
             select coin, side, price, size, notional_usd, event_time_ms, dir
             from public.wallet_fill_events
@@ -699,7 +738,7 @@ class PostgresDatabase:
 
     async def add_evm_address(self, tracked_address: TrackedAddress) -> Optional[int]:
         try:
-            row = await self.conn.fetchrow(
+            row = await self._fetchrow(
                 """
                 insert into public.evm_tracked_addresses (
                     user_id, address, label, address_type, token_contract,
@@ -727,20 +766,20 @@ class PostgresDatabase:
             return None
 
     async def get_user_evm_addresses(self, user_id: int) -> List[TrackedAddress]:
-        rows = await self.conn.fetch("select * from public.evm_tracked_addresses where user_id = $1 order by created_at desc", user_id)
+        rows = await self._fetch("select * from public.evm_tracked_addresses where user_id = $1 order by created_at desc", user_id)
         return [self._tracked_address_from_row(row) for row in rows]
 
     async def get_all_active_evm_addresses(self) -> List[TrackedAddress]:
-        rows = await self.conn.fetch("select * from public.evm_tracked_addresses where active = true")
+        rows = await self._fetch("select * from public.evm_tracked_addresses where active = true")
         return [self._tracked_address_from_row(row) for row in rows]
 
     async def get_users_tracking_evm_address(self, address: str) -> List[TrackedAddress]:
-        rows = await self.conn.fetch("select * from public.evm_tracked_addresses where address = $1 and active = true", address.lower())
+        rows = await self._fetch("select * from public.evm_tracked_addresses where address = $1 and active = true", address.lower())
         return [self._tracked_address_from_row(row) for row in rows]
 
     async def update_evm_address_active(self, address_id: int, active: bool) -> bool:
         try:
-            await self.conn.execute("update public.evm_tracked_addresses set active = $1 where id = $2", active, address_id)
+            await self._execute("update public.evm_tracked_addresses set active = $1 where id = $2", active, address_id)
             return True
         except Exception as e:
             logger.error(f"Error updating EVM address active status: {e}")
@@ -748,17 +787,17 @@ class PostgresDatabase:
 
     async def delete_evm_address(self, address_id: int, user_id: int) -> bool:
         try:
-            result = await self.conn.execute("delete from public.evm_tracked_addresses where id = $1 and user_id = $2", address_id, user_id)
+            result = await self._execute("delete from public.evm_tracked_addresses where id = $1 and user_id = $2", address_id, user_id)
             return result.split()[-1] != "0"
         except Exception as e:
             logger.error(f"Error deleting EVM address: {e}")
             return False
 
     async def get_stats(self) -> dict:
-        total_users = await self.conn.fetchval("select count(*) from public.users")
-        total_wallets = await self.conn.fetchval("select count(*) from public.wallets")
-        active_wallets = await self.conn.fetchval("select count(*) from public.wallets where active = true")
-        active_evm_addresses = await self.conn.fetchval("select count(*) from public.evm_tracked_addresses where active = true")
+        total_users = await self._fetchval("select count(*) from public.users")
+        total_wallets = await self._fetchval("select count(*) from public.wallets")
+        active_wallets = await self._fetchval("select count(*) from public.wallets where active = true")
+        active_evm_addresses = await self._fetchval("select count(*) from public.evm_tracked_addresses where active = true")
         return {
             "total_users": total_users,
             "total_wallets": total_wallets,

@@ -18,6 +18,7 @@ from config import ensure_data_directory, get_settings
 from core.database import Database
 from core.database_factory import create_database
 from core.hyperliquid_info_client import HyperliquidInfoClient
+from token_distribution.sample_projects import SAMPLE_PROJECTS
 
 
 PROJECT_ROOT = Path(__file__).parent
@@ -26,6 +27,13 @@ DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 db: Database | None = None
 info_client: HyperliquidInfoClient | None = None
 live_poll_task: asyncio.Task | None = None
+
+
+def require_dashboard_db() -> Database:
+    """Return an initialized dashboard database or raise a 503 error."""
+    if db is None or getattr(db, "conn", None) is None:
+        raise HTTPException(status_code=503, detail="Dashboard database is unavailable")
+    return db
 
 
 def get_window_start_ms(window: str) -> int:
@@ -124,6 +132,10 @@ async def poll_live_snapshots():
     await asyncio.sleep(2)
     while True:
         try:
+            if db is None or info_client is None:
+                await asyncio.sleep(interval)
+                continue
+
             active_wallets = await db.get_all_active_wallets()
             for wallet in active_wallets:
                 try:
@@ -172,10 +184,17 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     ensure_data_directory()
 
-    db = create_database(settings)
-    await db.connect()
-    info_client = HyperliquidInfoClient(settings.hyperliquid_rest_url)
-    live_poll_task = asyncio.create_task(poll_live_snapshots())
+    try:
+        db = create_database(settings)
+        await db.connect()
+        info_client = HyperliquidInfoClient(settings.hyperliquid_rest_url)
+        live_poll_task = asyncio.create_task(poll_live_snapshots())
+    except Exception as error:
+        print(f"Dashboard database startup degraded: {error}")
+        db = None
+        info_client = None
+        live_poll_task = None
+
     try:
         yield
     finally:
@@ -187,7 +206,8 @@ async def lifespan(app: FastAPI):
                 pass
         if info_client:
             await info_client.close()
-        await db.close()
+        if db:
+            await db.close()
 
 
 app = FastAPI(
@@ -218,10 +238,17 @@ async def dashboard_index():
     return FileResponse(DASHBOARD_DIR / "index.html")
 
 
+@app.get("/token-distribution")
+async def token_distribution_index():
+    """Serve the token distribution dashboard UI."""
+    return FileResponse(DASHBOARD_DIR / "token-distribution.html")
+
+
 @app.get("/api/dashboard/overview")
 async def dashboard_overview(window: str = Query(default="1h")):
     start_ms = get_window_start_ms(window)
-    return await db.get_dashboard_overview(start_ms)
+    database = require_dashboard_db()
+    return await database.get_dashboard_overview(start_ms)
 
 
 @app.get("/api/dashboard/assets")
@@ -230,17 +257,20 @@ async def dashboard_assets(
     limit: int = Query(default=25, ge=1, le=100),
 ):
     start_ms = get_window_start_ms(window)
-    return {"items": await db.get_dashboard_asset_flows(start_ms, limit)}
+    database = require_dashboard_db()
+    return {"items": await database.get_dashboard_asset_flows(start_ms, limit)}
 
 
 @app.get("/api/dashboard/live-overview")
 async def dashboard_live_overview():
-    return await db.get_live_dashboard_overview()
+    database = require_dashboard_db()
+    return await database.get_live_dashboard_overview()
 
 
 @app.get("/api/dashboard/live-assets")
 async def dashboard_live_assets(limit: int = Query(default=25, ge=1, le=100)):
-    return {"items": await db.get_live_asset_exposure(limit)}
+    database = require_dashboard_db()
+    return {"items": await database.get_live_asset_exposure(limit)}
 
 
 @app.get("/api/dashboard/wallets")
@@ -249,7 +279,8 @@ async def dashboard_wallets(
     limit: int = Query(default=100, ge=1, le=300),
 ):
     start_ms = get_window_start_ms(window)
-    return {"items": await db.get_dashboard_wallet_summaries(start_ms, limit)}
+    database = require_dashboard_db()
+    return {"items": await database.get_dashboard_wallet_summaries(start_ms, limit)}
 
 
 @app.get("/api/dashboard/recent-fills")
@@ -258,16 +289,50 @@ async def dashboard_recent_fills(
     limit: int = Query(default=50, ge=1, le=200),
 ):
     start_ms = get_window_start_ms(window)
-    return {"items": await db.get_recent_fill_events(start_ms, limit)}
+    database = require_dashboard_db()
+    return {"items": await database.get_recent_fill_events(start_ms, limit)}
 
 
 @app.get("/api/dashboard/wallets/{wallet_id}")
 async def dashboard_wallet_detail(wallet_id: int, window: str = Query(default="1h")):
     start_ms = get_window_start_ms(window)
-    detail = await db.get_wallet_dashboard_detail(wallet_id, start_ms)
+    database = require_dashboard_db()
+    detail = await database.get_wallet_dashboard_detail(wallet_id, start_ms)
     if detail is None:
         raise HTTPException(status_code=404, detail="Wallet not found")
     return detail
+
+
+@app.get("/api/token-distribution/projects")
+async def token_distribution_projects():
+    """List the sample projects available to the distribution dashboard."""
+    items = []
+    for project in SAMPLE_PROJECTS.values():
+        items.append({
+            "slug": project.slug,
+            "display_name": project.display_name,
+            "symbol": project.symbol,
+            "chain_slug": project.chain_slug,
+            "token_address": project.token_address,
+            "window_days": project.window_days,
+        })
+    return {"items": items}
+
+
+@app.get("/api/token-distribution/current")
+async def token_distribution_current(project_slug: str = Query(default="based_eth")):
+    """Load a saved token distribution payload, or fall back to a setup stub."""
+    project = SAMPLE_PROJECTS.get(project_slug)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Unknown token distribution project")
+
+    output_path = project.output_path(PROJECT_ROOT)
+    if not output_path.exists():
+        return project.dashboard_stub(PROJECT_ROOT)
+
+    import json
+
+    return json.loads(output_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

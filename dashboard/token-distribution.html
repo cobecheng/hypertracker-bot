@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Token Distribution Lab</title>
+    <link rel="stylesheet" href="/dashboard/static/token-distribution.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">First-Week Forensics</p>
+          <h1>Token Distribution Lab</h1>
+          <p class="hero-text">
+            Trace how a token leaves genesis roots, which entities accumulate size, and how much supply ends up in treasury, liquidity, whales, exchanges, and retail-like wallets.
+          </p>
+        </div>
+        <div class="hero-controls">
+          <label class="field">
+            <span>Project</span>
+            <select id="project-select"></select>
+          </label>
+          <button id="refresh-button" class="action-button">Reload Result</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="panel lead-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Project</p>
+              <h2 id="project-title">Loading…</h2>
+              <p id="project-meta" class="meta-line"></p>
+            </div>
+            <div class="status-card">
+              <span id="status-pill" class="status-pill">Loading</span>
+              <p id="status-copy" class="status-copy">Pulling the latest saved analysis payload.</p>
+            </div>
+          </div>
+          <div class="lead-grid">
+            <div class="lead-block">
+              <div class="lead-label">Token</div>
+              <div id="token-address" class="lead-value mono"></div>
+            </div>
+            <div class="lead-block">
+              <div class="lead-label">Window</div>
+              <div id="window-copy" class="lead-value"></div>
+            </div>
+            <div class="lead-block">
+              <div class="lead-label">Roots</div>
+              <div id="root-count" class="lead-value"></div>
+            </div>
+            <div class="lead-block">
+              <div class="lead-label">Supply Basis</div>
+              <div id="supply-basis" class="lead-value"></div>
+            </div>
+          </div>
+          <div id="notes-card" class="notes-card"></div>
+        </section>
+
+        <section class="panel metrics-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">High-Level View</p>
+              <h2>Allocation Snapshot</h2>
+            </div>
+            <p class="panel-copy">All percentages are shown against the saved supply basis in the analysis payload.</p>
+          </div>
+          <div id="metric-grid" class="metric-grid"></div>
+        </section>
+
+        <section class="panel setup-panel hidden" id="setup-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Setup</p>
+              <h2>Analysis Not Saved Yet</h2>
+            </div>
+          </div>
+          <div id="setup-copy" class="setup-copy"></div>
+        </section>
+
+        <section class="panel bucket-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Buckets</p>
+              <h2>Holder Composition</h2>
+            </div>
+          </div>
+          <div id="bucket-list" class="bucket-list"></div>
+        </section>
+
+        <section class="panel holder-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Top Holders</p>
+              <h2>End-of-Window Leaders</h2>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Holder</th>
+                  <th>Category</th>
+                  <th>Balance</th>
+                  <th>% of Basis</th>
+                  <th>Hop</th>
+                </tr>
+              </thead>
+              <tbody id="holder-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel route-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Flow Destinations</p>
+              <h2>Notable Routes</h2>
+            </div>
+          </div>
+          <div id="route-list" class="route-list"></div>
+        </section>
+
+        <section class="panel edge-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Graph Edges</p>
+              <h2>Largest Aggregated Transfers</h2>
+            </div>
+          </div>
+          <div id="edge-list" class="edge-list"></div>
+        </section>
+
+        <section class="panel transfer-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Largest Transfers</p>
+              <h2>Biggest Single Moves</h2>
+            </div>
+          </div>
+          <div id="transfer-list" class="transfer-list"></div>
+        </section>
+
+        <section class="panel diagnostics-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Diagnostics</p>
+              <h2>Method Notes</h2>
+            </div>
+          </div>
+          <div id="diagnostics-list" class="diagnostics-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/dashboard/static/token-distribution.js"></script>
+  </body>
+  </html>
